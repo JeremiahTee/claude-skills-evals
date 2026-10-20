@@ -1,0 +1,74 @@
+{
+  "skill": "gen-commits",
+  "accept": [
+    "gen-commits"
+  ],
+  "notes": "No scripts, so no self-test exists for this skill.",
+  "selftests": [],
+  "cases": [
+    {
+      "id": "gen-commits-01",
+      "prompt": "/gen-commits",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "gen-commits-02",
+      "prompt": "I've got a bunch of unrelated changes in the working tree, group them into commits",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "gen-commits-03",
+      "prompt": "give me a commit plan for this repo",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "gen-commits-04",
+      "prompt": "stage plan please: tools, tests and docs all changed",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "gen-commits-05",
+      "prompt": "organize my uncommitted changes into logical commits for main",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "gen-commits-06",
+      "prompt": "commit list?",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "gen-commits-07",
+      "prompt": "just commit the README typo fix",
+      "expect": "no",
+      "kind": "near-miss",
+      "source": "gen-commits: Do NOT use for a single obvious one-file commit"
+    },
+    {
+      "id": "gen-commits-08",
+      "prompt": "fix the message on my last commit, it has a typo",
+      "expect": "no",
+      "kind": "near-miss",
+      "source": "gen-commits: Do NOT use for amend-only message fixes"
+    },
+    {
+      "id": "gen-commits-09",
+      "prompt": "I have merge conflicts in package-lock.json after the rebase, help me resolve them",
+      "expect": "no",
+      "kind": "near-miss",
+      "source": "gen-commits: Do NOT use for merge-conflict resolution"
+    },
+    {
+      "id": "gen-commits-10",
+      "prompt": "what's the weather tomorrow?",
+      "expect": "no",
+      "kind": "unrelated",
+      "better": "none"
+    }
+  ]
+}

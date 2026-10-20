@@ -1,0 +1,90 @@
+{
+  "skill": "handoff",
+  "accept": [
+    "handoff"
+  ],
+  "notes": "Near misses sit next to handoff in the example catalogue: wrap (end-of-session status), resume (picking work back up), journal and extract-learnings.",
+  "selftests": [],
+  "cases": [
+    {
+      "id": "handoff-01",
+      "prompt": "Context is almost full. Write me a handoff so I can /clear and keep going on the parser refactor.",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "handoff-02",
+      "prompt": "the context window is nearly full, write the continuation note before I clear",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "handoff-03",
+      "prompt": "save and continue, I have to jump to the work laptop in the middle of this migration",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "handoff-04",
+      "prompt": "give me a prompt to continue this in a fresh session",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "handoff-05",
+      "prompt": "we're at 90% context, clear context and carry on after",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "handoff-06",
+      "prompt": "/handoff",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "handoff-07",
+      "prompt": "before I switch machines, write the continuation prompt for this task with the exact next commands",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "handoff-08",
+      "prompt": "wrap up before clear: finish pending tasks and save my notes and memory",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "wrap",
+      "source": "handoff: Do NOT use for an end-of-session status check (use wrap)"
+    },
+    {
+      "id": "handoff-09",
+      "prompt": "draft today's journal from my sessions",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "journal",
+      "source": "handoff: Do NOT use ... for the daily log (use journal)"
+    },
+    {
+      "id": "handoff-10",
+      "prompt": "where was I? pick up yesterday's work",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "resume",
+      "source": "sibling skill resume reloads; handoff writes the note"
+    },
+    {
+      "id": "handoff-11",
+      "prompt": "extract learnings from this bug fix before we move on",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "extract-learnings"
+    },
+    {
+      "id": "handoff-12",
+      "prompt": "what's the weather tomorrow?",
+      "expect": "no",
+      "kind": "unrelated",
+      "better": "none"
+    }
+  ]
+}

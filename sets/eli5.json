@@ -1,0 +1,88 @@
+{
+  "skill": "eli5",
+  "accept": [
+    "eli5"
+  ],
+  "notes": "Near misses share words with eli5 (explain, learn, understand, finding) but belong to extract-learnings, notes-search, code-review, journal, handoff or none.",
+  "selftests": [],
+  "cases": [
+    {
+      "id": "eli5-01",
+      "prompt": "/eli5 3",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "eli5-02",
+      "prompt": "eli5 this, i dont get the half-open part of the circuit breaker",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "eli5-03",
+      "prompt": "explain like I'm 5 how the sqlite log renders the markdown file",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "eli5-04",
+      "prompt": "i dont understand finding 2, what does 'lease' mean there?",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "eli5-05",
+      "prompt": "what does WAL mode actually mean in that db connect function? dumb it down",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "eli5-06",
+      "prompt": "that explanation went over my head, can you break the retry backoff down simply",
+      "expect": "trigger",
+      "kind": "positive"
+    },
+    {
+      "id": "eli5-n1",
+      "prompt": "what did we learn today? capture the insights from this session",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "extract-learnings"
+    },
+    {
+      "id": "eli5-n2",
+      "prompt": "extract learnings from the bug fix we just finished",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "extract-learnings"
+    },
+    {
+      "id": "eli5-n3",
+      "prompt": "what do I know about sqlite from my notes?",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "notes-search"
+    },
+    {
+      "id": "eli5-n4",
+      "prompt": "review the diff on this branch for bugs",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "code-review"
+    },
+    {
+      "id": "eli5-n5",
+      "prompt": "journal today, log my day",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "journal"
+    },
+    {
+      "id": "eli5-n8",
+      "prompt": "context is full, write a handoff so I can clear and continue",
+      "expect": "no",
+      "kind": "near-miss",
+      "better": "handoff"
+    }
+  ]
+}
