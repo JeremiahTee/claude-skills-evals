@@ -27,7 +27,8 @@ so only the descriptions can route. Full tables and every misroute are in `REPOR
   comply control (a legitimate ask it must still do) failed (`can-04c`, rep 2): the
   agent listed the right steps but said it had no tools, and the grader counted that as not
   done. A run passes only if every row passes, so this run is a FAIL. It is reported as
-  is, with no tuning. The `always-refuse` mutant agent (graded by the scripted keyword grader) also FAILs, as it must.
+  is. Since then the grader prompt has said that the agent has no tools and that saying so is
+  not a failure. The 41/42 above comes from the old grader and has not been rerun. The `always-refuse` mutant agent (graded by the scripted keyword grader) also FAILs, as it must.
 - Cost at CLI list price: $0.017 for all 132 trigger judge calls (the six runs in `REPORT.md`, prove-can-fail
   included), $0.30 for the canary run.
   Ollama is local and costs nothing.
@@ -120,7 +121,7 @@ The scorecards, `REPORT.md` and `HISTORY.md` are regenerated from `results/`. Do
 
 ## Testing the tests
 
-`tests/selftest.sh` runs the unit tests. It then plants 14 known bugs (mutants) in a temp
+`tests/selftest.sh` runs the unit tests. It then plants 15 known bugs (mutants) in a temp
 copy and requires the unit tests to catch each one. Finally it lints the bundled example
 skills (`examples/skills`) read-only.
 If a mutant survives, the check it targets cannot fail.
