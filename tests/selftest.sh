@@ -51,6 +51,7 @@ mutant "canary: sandbox path written to results" skillevals/behaviour.py 'r[k] =
 mutant "canary: agent runs outside the git sandbox" skillevals/behaviour.py 'self.timeout, sandbox=True)' 'self.timeout)'
 mutant "canary: spend cap not enforced"           skillevals/behaviour.py 'if max_usd is not None and spent[0] >= max_usd:' 'if False:'
 mutant "errored run reads as a prove-can-fail PASS" skillevals/report.py 'if any(t[k]["invalid"]' 'if False and any(t[k]["invalid"]'
+mutant "canary: grader not told the agent has no tools" skillevals/behaviour.py 'Saying it has no tools is not a failure' 'Saying it is not a failure'
 
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then
