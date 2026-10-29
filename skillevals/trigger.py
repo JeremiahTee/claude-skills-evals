@@ -115,6 +115,7 @@ def run(sets: list[dict], judge, catalogue: dict, run_id: str, variant: str = "b
             "desc_sha": cat_mod.sha(catalogue[s["skill"]].description) if s["skill"] in catalogue else None,
             "catalogue_sha": cat_sha,
             "cost_basis": getattr(judge, "cost_basis", "none"),
+            "usage": None,
         }
         if over:
             row.update(picked=None, outcome=None, error="budget cap reached", latency_s=0, cost_usd=0)
@@ -125,7 +126,7 @@ def run(sets: list[dict], judge, catalogue: dict, run_id: str, variant: str = "b
         with lock:
             spent[0] += v.cost_usd
         row.update(picked=v.picked, outcome=outcome(c["expect"], v.picked, s["accept"]),
-                   error=v.error, latency_s=round(v.latency_s, 2), cost_usd=round(v.cost_usd, 6),
+                   error=v.error, latency_s=round(v.latency_s, 2), cost_usd=round(v.cost_usd, 6), usage=v.usage,
                    raw=(v.raw or "")[:200])
         progress(f"  {row['case_id']:<10} expect={c['expect']:<7} picked={str(v.picked):<22} "
                  f"{row['outcome'] or 'ERR ' + str(v.error)}")

@@ -114,6 +114,7 @@ class Reply:
     latency_s: float
     cost_usd: float = 0.0
     error: str | None = None
+    usage: dict | None = None  # anthropic: only, the four billed token counts
 
 
 def skill_body(path: Path) -> str:
@@ -224,7 +225,7 @@ class AnthropicAgent:
 
     def __call__(self, system: str, prompt: str) -> Reply:
         r = self.call(system, prompt)
-        return Reply(r.text, r.latency_s, r.cost_usd, r.error)
+        return Reply(r.text, r.latency_s, r.cost_usd, r.error, r.usage)
 
 
 class MutantAgent:
@@ -304,7 +305,7 @@ class AnthropicGrader:
 
     def __call__(self, case: dict, replies: list[str]) -> tuple[list[dict] | None, Reply]:
         r = self.call(GRADER_SYSTEM, self.prompt(case, replies), GRADES_SCHEMA)
-        rep = Reply(r.text, r.latency_s, r.cost_usd, r.error)
+        rep = Reply(r.text, r.latency_s, r.cost_usd, r.error, r.usage)
         if r.error:
             return None, rep
         g = parse_grades(r.text, len(replies))
@@ -382,6 +383,7 @@ def run(cset: dict, skill_text: str, agent, grader, run_id: str, reps: int = 3,
                    "agent": agent.label, "grader": grader.label,
                    "reply": r.text, "agent_latency_s": round(r.latency_s, 2),
                    "agent_cost_usd": round(r.cost_usd, 6), "grader_cost_usd": 0.0,
+                   "agent_usage": r.usage, "grader_usage": None,
                    "agent_cost_basis": getattr(agent, "cost_basis", "none"),
                    "grader_cost_basis": getattr(grader, "cost_basis", "none"),
                    "behaviour": None, "meets_pass_if": None, "why": None, "passed": None,
@@ -396,7 +398,7 @@ def run(cset: dict, skill_text: str, agent, grader, run_id: str, reps: int = 3,
                                passed=g["behaviour"] == c["expect"] and g["meets_pass_if"])
             rows.append(row)
         if rows:
-            rows[0]["grader_cost_usd"] = round(graw.cost_usd, 6)
+            rows[0].update(grader_cost_usd=round(graw.cost_usd, 6), grader_usage=graw.usage)
         with lock:
             for row in rows:
                 progress(f"  {row['case_id']:<8} rep{row['rep']} expect={row['expect']:<6} "
@@ -420,7 +422,8 @@ def regrade(rows: list[dict], cset: dict, grader, run_id: str) -> list[dict]:
         for i, r in enumerate(old):
             new = dict(r, run_id=run_id, grader=grader.label, regraded_from=r["run_id"],
                        grader_cost_basis=getattr(grader, "cost_basis", "none"),
-                       grader_cost_usd=round(g.cost_usd, 6) if i == 0 else 0.0, agent_cost_usd=0.0)
+                       grader_cost_usd=round(g.cost_usd, 6) if i == 0 else 0.0, agent_cost_usd=0.0,
+                       grader_usage=g.usage if i == 0 else None, agent_usage=None)
             if grades is None:
                 new.update(behaviour=None, meets_pass_if=None, why=None, passed=None, error=f"grader: {g.error}")
             else:

@@ -158,6 +158,12 @@ is a row error, never a verdict. Server-side model fallbacks are not used.
   first grading read.
 - Costs are kept per basis: `real dollars (API)` for `anthropic:` rows, `list price (CLI)` for
   `claude -p` rows. Reports never add the two.
+- `anthropic:` rows also keep the token counts the call was billed for (`input_tokens`,
+  `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`): `usage` on
+  trigger rows, `agent_usage` and `grader_usage` on canary rows (the grader's on the first row
+  of each case, like its cost: rep 0 in a run, the first re-graded reply in a `--regrade`).
+  A refused or truncated reply keeps its usage, since it was billed. Regrade rows write
+  `agent_usage: null` (no agent call was made). Other backends write `null`.
 - `scorecards/<date>/<run>/`: one markdown scorecard per skill, plus `_summary.md`.
 - `REPORT.md`: the file to read. It shows the latest full baseline per judge, the misroutes,
   the prove-can-fail verdicts and the invalid runs. A run where more than 20% of rows errored

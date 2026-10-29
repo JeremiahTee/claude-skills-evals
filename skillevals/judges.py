@@ -42,6 +42,7 @@ class Verdict:
     latency_s: float
     cost_usd: float = 0.0
     error: str | None = None
+    usage: dict | None = None   # anthropic: only, the four billed token counts
 
 
 def parse_pick(text: str, names: set[str]) -> str | None:
@@ -116,9 +117,9 @@ class AnthropicJudge:
     def __call__(self, system: str, prompt: str, names: set[str]) -> Verdict:
         r = self.call(system, prompt, PICK_SCHEMA)
         if r.error:
-            return Verdict(None, r.text, r.latency_s, r.cost_usd, r.error)
+            return Verdict(None, r.text, r.latency_s, r.cost_usd, r.error, r.usage)
         pick = parse_pick(r.text, names)
-        return Verdict(pick, r.text, r.latency_s, r.cost_usd, None if pick else "unparseable reply")
+        return Verdict(pick, r.text, r.latency_s, r.cost_usd, None if pick else "unparseable reply", r.usage)
 
 
 class OllamaJudge:
