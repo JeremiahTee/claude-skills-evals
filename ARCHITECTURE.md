@@ -37,10 +37,21 @@ the bundled `examples/skills` via `--skills-dir`) and never writes there.
   again with a changed grader (one call per case, no agent calls). `canaries/overnight-runner.json`
   holds 14 canaries: 7 refuse cases, each with a comply control `<id>c`; each case's `rule`
   quotes the SKILL.md sentence its `pass_if` restates (the unit tests check both).
+- `skillevals/api.py`: the `anthropic:` backend's single request path (official SDK, imported on
+  first call). Structured output for judge and grader, cached system prompt, no server-side
+  fallbacks. Refusal, `max_tokens`, a reply from another model and SDK errors become row errors.
+  `AnthropicJudge` (judges.py), `AnthropicAgent` and `AnthropicGrader` (behaviour.py) wrap it.
+  The API agent gets the same frame as `ClaudeAgent` but no sandbox cwd.
+- Every result row records its `cost_basis` (`api-usage` or `cli-list`; canary rows one per
+  agent and grader), and `report.cost_by_basis` keeps the totals apart. Canary replies are cut
+  to `REPLY_CHARS` (4000) before grading and storing, which also bounds an API grader's input.
+- `skillevals/prices.py`: dated per-model API prices, real-dollar cost per reply, and the
+  worst-case preflight that refuses an `anthropic:` run whose plan could pass `--max-usd`.
 - `skillevals/report.py`: per-skill scorecards, `HISTORY.md`, `REPORT.md` (latest baseline per
   judge, misroutes, prove-can-fail verdicts, invalid runs) and `compare` (which cases flipped).
 - `skillevals/__main__.py`: the CLI, with `lint`, `trigger`, `compare`, `history`, `report` and
   `prove-can-fail`, `canary`. `trigger --no-report` leaves HISTORY.md and REPORT.md alone.
+  `--workspace DIR` sends every output under `DIR` instead of the repo.
   `canary` and `prove-can-fail` assert that the real SKILL.md sha is unchanged before and after.
   `prove-can-fail` accepts a set's `draft` as its target (via `with_drafts`).
 
@@ -59,14 +70,15 @@ a `judge` field, so a stray canary file next to trigger results cannot crash or 
 
 ## Storage
 
-Plain files in the repo. No database, no cache. `results/` and `scorecards/` hold synthetic
+Plain files in the repo, or under `--workspace DIR` for private runs. No database, no cache. `results/` and `scorecards/` hold synthetic
 prompts only, the same text as `sets/`, plus canary agent replies (synthetic contexts from
 `canaries/`; the agent has no tools, so a reply is a declared plan, not an action).
 
 ## Security boundary
 
-- Outbound traffic: the Claude judge (the Anthropic API, through the user's existing CLI login)
-  and ollama on loopback. Self-tests marked `network` run only on opt-in.
+- Outbound traffic: the Claude judge (the Anthropic API, through the user's existing CLI login),
+  the `anthropic:` backend (the API through the SDK, with the key or profile the SDK finds), and
+  ollama on loopback. Self-tests marked `network` run only on opt-in.
 - No secrets in code or config. The judge subprocess inherits no user hooks, CLAUDE.md, memory
   or MCP.
 - Skills are read-only: broken or overridden descriptions exist only in memory.
@@ -80,6 +92,6 @@ prompts only, the same text as `sets/`, plus canary agent replies (synthetic con
 python3 -m skillevals report                     # read the current state
 python3 -m skillevals --skills-dir examples/skills trigger --judge ollama:qwen3:8b
 python3 -m skillevals canary --reps 3 --max-calls 60  # behaviour canaries (default: overnight-runner draft)
-python3 -m unittest discover -s tests -v         # tests/test_harness.py, offline
+python3 -m unittest discover -s tests -v         # tests/, offline (the API is a fake client)
 bash tests/selftest.sh                           # unit tests + planted mutants + lint of examples/skills
 ```

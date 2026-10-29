@@ -19,7 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import catalogue as cat_mod
-from . import behaviour, judges, lint, report, trigger
+from . import api, behaviour, judges, lint, prices, report, trigger
 
 ROOT = Path(__file__).resolve().parent.parent
 BROKEN_DESC = "Use when the user wants help pricing vintage furniture."
@@ -27,6 +27,76 @@ BREAK_MODES = {
     "wrong": lambda d: BROKEN_DESC,                                            # copy-paste accident
     "no-negatives": lambda d: re.split(r"\s*Do NOT use", d, flags=re.I)[0],    # guard-rails removed
 }
+
+
+def _out(args) -> Path:
+    """Where results, scorecards, HISTORY.md and REPORT.md go: --workspace, else the repo."""
+    return Path(args.workspace).expanduser() if getattr(args, "workspace", None) else ROOT
+
+
+def _preflight(plan: list[tuple[str, int, int, int]], max_usd: float) -> None:
+    """Real-dollar worst case for the anthropic: parts of a run; CLI and local backends add nothing."""
+    if plan:
+        worst = prices.preflight(plan, max_usd)
+        print(f"preflight: worst case ${worst:.4f} <= --max-usd ${max_usd} (API prices as of {prices.PRICES_AS_OF})")
+
+
+def _trigger_plan(args, sets, cat, judge, runs: int) -> list[tuple[str, int, int, int]]:
+    if not isinstance(judge, judges.AnthropicJudge):
+        return []
+    # names padded so the bound also covers blind ids
+    system = judges.ROUTER_SYSTEM.format(catalogue="\n".join(
+        f"- skill-000-{s.name}: {s.description}" for s in cat.values()))
+    longest = max((c["prompt"] for s in sets for c in s["cases"]), key=lambda t: len(t.encode("utf-8")))
+    calls = sum(len(s["cases"]) for s in sets) * args.samples * runs
+    return [(judge.model, calls, prices.estimate_tokens(system) + prices.estimate_tokens(longest)
+             + prices.estimate_tokens(json.dumps(judges.PICK_SCHEMA)), judge.max_tokens)]
+
+
+def _agent(spec: str):
+    kind, _, model = spec.partition(":")
+    if kind == "mutant":
+        return behaviour.MutantAgent(model)
+    if kind == "claude":
+        return behaviour.ClaudeAgent(model or "sonnet")
+    if kind == "anthropic":
+        return behaviour.AnthropicAgent(*api.parse_spec(model or "claude-sonnet-5-5"))
+    raise SystemExit(f"unknown agent {spec!r} (use claude[:model], anthropic:<model-id>[@effort], "
+                     "mutant:always-refuse, mutant:always-comply)")
+
+
+def _grader(spec: str):
+    kind, _, model = spec.partition(":")
+    if kind == "scripted":
+        return behaviour.ScriptedGrader()
+    if kind == "claude":
+        return behaviour.ClaudeGrader(model or "haiku")
+    if kind == "anthropic":
+        return behaviour.AnthropicGrader(*api.parse_spec(model or "claude-opus-5-5"))
+    raise SystemExit(f"unknown grader {spec!r} (use claude[:model], anthropic:<model-id>[@effort], scripted)")
+
+
+def _canary_plan(cases, skill_text, agent, grader, reps: int, replies: list[str] | None = None):
+    """Agent calls (none on a regrade) and one grader call per case, each at its worst case."""
+    plan = []
+    if not cases:
+        return plan
+    if isinstance(agent, behaviour.AnthropicAgent) and replies is None:
+        system = behaviour.AGENT_FRAME.format(skill=skill_text)
+        longest = max(len(behaviour.AGENT_USER.format(context=c["context"], task=c["task"]).encode("utf-8"))
+                      for c in cases)
+        plan.append((agent.model, len(cases) * reps, prices.estimate_tokens(system + "x" * longest),
+                     agent.max_tokens))
+    if isinstance(grader, behaviour.AnthropicGrader):
+        longest = max(len(grader.prompt(c, []).encode("utf-8")) for c in cases)
+        if replies is not None:
+            reply_tokens = prices.estimate_tokens("".join(replies))
+        else:  # not written yet: every reply is cut to REPLY_CHARS before grading, whatever the agent
+            reply_tokens = reps * prices.estimate_tokens("x" * behaviour.REPLY_CHARS * 2)  # x2: non-ASCII bytes
+        plan.append((grader.model, len(cases), prices.estimate_tokens(behaviour.GRADER_SYSTEM + "x" * longest)
+                     + prices.estimate_tokens(json.dumps(behaviour.GRADES_SCHEMA)) + reply_tokens,
+                     grader.max_tokens))
+    return plan
 
 
 def _sets(args) -> list[dict]:
@@ -83,14 +153,15 @@ def _trigger(args, sets, judge, cat, variant) -> list[dict]:
     run_id = trigger.new_run_id(judge.label, variant)
     print(f"run {run_id}  judge={judge.label}  cases={sum(len(s['cases']) for s in sets) * args.samples}")
     rows = trigger.run(sets, judge, cat, run_id, variant, args.max_usd, args.samples, blind=args.blind_names)
-    p = trigger.write_jsonl(rows, ROOT)
+    out = _out(args)
+    p = trigger.write_jsonl(rows, out)
     checks = [] if args.no_lint else _checks(sets, Path(args.skills_dir).expanduser(), args.network,
                                              args.run_selftests)
-    sc = report.write_scorecards(rows, checks, ROOT)
+    sc = report.write_scorecards(rows, checks, out)
     if not getattr(args, "no_report", False):
-        report.history(ROOT)
-        report.write_summary(ROOT)
-    print(f"results:    {p.relative_to(ROOT)}\nscorecards: {sc.relative_to(ROOT)}/_summary.md")
+        report.history(out)
+        report.write_summary(out)
+    print(f"results:    {p.relative_to(out)}\nscorecards: {sc.relative_to(out)}/_summary.md")
     print((sc / "_summary.md").read_text())
     return rows
 
@@ -100,7 +171,10 @@ def cmd_trigger(args) -> int:
     cat = cat_mod.with_drafts(cat_mod.load(Path(args.skills_dir).expanduser()), sets)
     ov = _overrides(args, cat)
     variant = args.variant or ("override" if ov else "baseline")
-    rows = _trigger(args, sets, judges.make(args.judge), cat_mod.with_overrides(cat, ov), variant)
+    judge = judges.make(args.judge)
+    cat = cat_mod.with_overrides(cat, ov)
+    _preflight(_trigger_plan(args, sets, cat, judge, runs=1), args.max_usd)
+    rows = _trigger(args, sets, judge, cat, variant)
     return 1 if any(r.get("error") == "budget cap reached" for r in rows) else 0
 
 
@@ -115,12 +189,12 @@ def cmd_compare(args) -> int:
 
 
 def cmd_history(args) -> int:
-    print(report.history(ROOT))
+    print(report.history(_out(args)))
     return 0
 
 
 def cmd_report(args) -> int:
-    p = report.write_summary(ROOT)
+    p = report.write_summary(_out(args))
     print(p.read_text())
     return 0
 
@@ -140,6 +214,7 @@ def cmd_prove(args) -> int:
     real = Path(cat[args.target].path)  # the installed SKILL.md, or the draft file
     before_sha = _file_sha(real)
     judge = judges.make(args.judge)
+    _preflight(_trigger_plan(args, sets, cat, judge, runs=3), args.max_usd)  # baseline, broken, restored
     args.no_lint = True
     f1, errs = {}, {}
     for variant, ov in [("baseline", {}),
@@ -170,10 +245,7 @@ def cmd_canary(args) -> int:
     cset = behaviour.load(Path(args.canaries))
     draft = Path(args.skill_file).expanduser() if args.skill_file else cat_mod.resolve_draft(cset["draft"])
     skill_text = behaviour.skill_body(draft)
-    kind, _, model = args.agent.partition(":")
-    agent = behaviour.MutantAgent(model) if kind == "mutant" else behaviour.ClaudeAgent(model or "sonnet")
-    gk, _, gm = args.grader.partition(":")
-    grader = behaviour.ScriptedGrader() if gk == "scripted" else behaviour.ClaudeGrader(gm or "haiku")
+    agent, grader = _agent(args.agent), _grader(args.grader)
     run_id = behaviour.new_run_id(agent.label)
     before = _file_sha(draft)
     if args.regrade:
@@ -183,33 +255,38 @@ def cmd_canary(args) -> int:
         n = len({r["case_id"] for r in old})
         if n > args.max_calls:
             raise SystemExit(f"regrade needs {n} grader calls > cap {args.max_calls}")
+        ids = {r["case_id"] for r in old}
+        _preflight(_canary_plan([c for c in cset["canaries"] if c["id"] in ids], skill_text, agent, grader,
+                                args.reps, replies=[r.get("reply") or "" for r in old]), args.max_usd)
         run_id = run_id.replace("-canary-", "-canary-regrade-")
         print(f"regrade {args.regrade} -> {run_id}  grader={grader.label}  ({n} grader calls, 0 agent calls)")
         rows = behaviour.regrade(old, cset, grader, run_id)
         for r in rows:
             r["date"] = run_id[:10]
-        return _canary_out(rows, draft, before)
+        return _canary_out(rows, draft, before, _out(args))
+    cases = [c for c in cset["canaries"] if not args.case or c["id"] in args.case]
+    _preflight(_canary_plan(cases, skill_text, agent, grader, args.reps), args.max_usd)
     print(f"run {run_id}  agent={agent.label}  grader={grader.label}  reps={args.reps}  skill sha {before}")
     rows = behaviour.run(cset, skill_text, agent, grader, run_id, args.reps, args.max_calls, args.case,
                          max_usd=args.max_usd)
     for r in rows:
         r["skill_sha"] = before
-    return _canary_out(rows, draft, before)
+    return _canary_out(rows, draft, before, _out(args))
 
 
-def _canary_out(rows, draft, before) -> int:
+def _canary_out(rows, draft, before, out: Path) -> int:
     run_id = rows[0]["run_id"]
-    p = behaviour.write_jsonl(rows, ROOT)
+    p = behaviour.write_jsonl(rows, out)
     v = behaviour.verdict(rows)
     md = behaviour.render(rows, v)
-    sc = ROOT / "scorecards" / rows[0]["date"] / f"{run_id}.md"
+    sc = out / "scorecards" / rows[0]["date"] / f"{run_id}.md"
     sc.parent.mkdir(parents=True, exist_ok=True)
     sc.write_text(md, encoding="utf-8")
     after = _file_sha(draft)
-    print(f"results:   {p.relative_to(ROOT)}\nscorecard: {sc.relative_to(ROOT)}")
+    print(f"results:   {p.relative_to(out)}\nscorecard: {sc.relative_to(out)}")
     print(f"skill sha {before} -> {after} ({'unchanged' if before == after else 'CHANGED!'})")
     print(f"RESULT: {v['result']}  failed={v['failed_cases']}  refuse_ok={v['refuse_ok']}  "
-          f"comply_ok={v['comply_ok']}  errors={v['errors']}  ${v['cost_usd']}")
+          f"comply_ok={v['comply_ok']}  errors={v['errors']}  {report.fmt_costs(v['costs'])}")
     return {"PASS": 0, "FAIL": 1}.get(v["result"], 2)
 
 
@@ -217,6 +294,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="skillevals", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--skills-dir", default=str(cat_mod.DEFAULT_SKILLS_DIR))
+    ap.add_argument("--workspace", help="write results, scorecards, HISTORY.md and REPORT.md here "
+                                        "instead of the repo (use for private skills and cases)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
@@ -230,8 +309,10 @@ def main(argv=None) -> int:
 
     def judged(p):
         common(p)
-        p.add_argument("--judge", default="ollama:qwen3:8b", help="claude[:model] | ollama[:model] | scripted")
-        p.add_argument("--max-usd", type=float, default=1.0, help="hard cap on judge spend for the run")
+        p.add_argument("--judge", default="ollama:qwen3:8b",
+                       help="claude[:model] | anthropic:<model-id>[@effort] | ollama[:model] | scripted")
+        p.add_argument("--max-usd", type=float, default=1.0,
+                       help="hard cap on judge spend for the run (real dollars for anthropic:)")
         p.add_argument("--samples", type=int, default=1, help="repeat each prompt N times (flakiness)")
         p.add_argument("--no-lint", action="store_true")
         p.add_argument("--break-mode", choices=sorted(BREAK_MODES), default="wrong")
@@ -249,12 +330,13 @@ def main(argv=None) -> int:
     p = sub.add_parser("canary", help="behaviour canaries (refuse/comply) for one skill")
     p.add_argument("--canaries", default=str(ROOT / "canaries" / "overnight-runner.json"))
     p.add_argument("--skill-file", help="SKILL.md to load as the agent's system prompt (default: the set's draft)")
-    p.add_argument("--agent", default="claude:sonnet", help="claude[:model] | mutant:always-refuse | mutant:always-comply")
-    p.add_argument("--grader", default="claude:haiku", help="claude[:model] | scripted")
+    p.add_argument("--agent", default="claude:sonnet", help="claude[:model] | anthropic:<model-id>[@effort] | mutant:always-refuse | mutant:always-comply")
+    p.add_argument("--grader", default="claude:haiku", help="claude[:model] | anthropic:<model-id>[@effort] | scripted")
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--max-calls", type=int, default=60, help="refuse to start if the plan needs more claude calls")
     p.add_argument("--max-usd", type=float, default=0.5,
-                   help="hard stop: no new claude call once the run has spent this much (list price)")
+                   help="hard stop: no new call once the run has spent this much (CLI list price; real dollars "
+                        "for anthropic:, which also refuses to start if the worst case is over it)")
     p.add_argument("--case", nargs="*", help="only these canary ids")
     p.add_argument("--regrade", help="results .jsonl: grade its saved replies again (no agent calls)")
     p.set_defaults(fn=cmd_canary)

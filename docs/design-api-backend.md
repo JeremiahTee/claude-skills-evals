@@ -33,11 +33,14 @@ backend.
 - Credentials: whatever the SDK resolves (`ANTHROPIC_API_KEY` or a stored profile). The
   harness never reads, logs or stores a key.
 - Request shape: no `temperature` (current models reject it). Thinking cannot be turned off
-  on Opus 5.5; `--effort` sets `output_config.effort` and every row records the effort used,
-  so runs at different efforts are never compared silently. Default effort differs by model,
-  so a comparison always passes one explicit `--effort` for every model.
+  on Opus 5.5. Effort is a suffix on the spec (`anthropic:claude-opus-5-5@low`), so judge,
+  agent and grader can each have their own; it sets `output_config.effort`, and the row label
+  carries it (`@default` when unset), so runs at different efforts are never compared
+  silently. Default effort differs by model, so a comparison always gives every model the same
+  explicit suffix. (Built this way instead of one `--effort` flag, 2026-10-28.)
 - The agent gets the same frame as `ClaudeAgent` today: the skill body as system prompt, no
-  tools, the same canary prompt.
+  tools, the same canary prompt. Unlike the CLI agent, it has no sandbox working directory (an
+  API call has none).
 - Model check: the response's `model` field must equal the requested id; a mismatch is a row
   error, never a verdict.
 - Structured output: the judge asks for `{"skill": <one of the catalogue names or ids, or
@@ -74,7 +77,7 @@ backend.
 
 Decision: vary the trigger judge and the canary agent; hold the grader fixed.
 
-- Trigger: each of Haiku 5.5, Sonnet 5.5 and Opus 5.5 judges the bundled sets at one fixed `--effort` (the same for all three) with real names
+- Trigger: each of Haiku 5.5, Sonnet 5.5 and Opus 5.5 judges the bundled sets at one fixed effort suffix (the same for all three) with real names
   and with blind names, two runs each (one run of a model eval is a sample, not a score).
 - Canaries: each of the three models is the agent for one run of 14 cases x 3 reps.
 - Grader: two gradings of every canary run. Grading 1 is Claude Fable 5.1, which is not one of

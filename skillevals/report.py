@@ -65,6 +65,27 @@ def scorecard(skill: str, rows: list[dict], checks: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+COST_LABELS = {"api-usage": "real dollars (API)", "cli-list": "list price (CLI)"}
+
+
+def cost_by_basis(rows: list[dict], pairs=(("cost_usd", "cost_basis"),)) -> dict[str, float]:
+    """Spend per basis. API dollars and CLI list-price figures are never added together. Rows
+    written before `cost_basis` existed came from the CLI judge (or a free local one)."""
+    out: dict[str, float] = {}
+    for r in rows:
+        for cost_key, basis_key in pairs:
+            c = r.get(cost_key) or 0.0
+            if c:  # a free call (local model, mutant, scripted) adds nothing to any basis
+                basis = r.get(basis_key) or "cli-list"
+                out[basis] = round(out.get(basis, 0.0) + c, 6)
+    return out
+
+
+def fmt_costs(by_basis: dict[str, float]) -> str:
+    parts = [f"${v:.4f} {COST_LABELS.get(k, k)}" for k, v in sorted(by_basis.items())]
+    return " + ".join(parts) if parts else "$0.0000"
+
+
 def write_scorecards(rows: list[dict], checks: list[dict], root: Path) -> Path:
     run_id = rows[0]["run_id"]
     out = root / "scorecards" / rows[0]["date"] / run_id
@@ -82,8 +103,7 @@ def write_scorecards(rows: list[dict], checks: list[dict], root: Path) -> Path:
         summary.append(f"| [{skill}]({skill}.md) | {fmt(m.precision)} | {fmt(m.recall)} | {fmt(m.f1)} | "
                        f"{fmt(m.accuracy)} | {m.errors} | {sum(c['level'] == 'FAIL' for c in cs)} | "
                        f"{sum(c['level'] == 'WARN' for c in cs)} |")
-    cost = sum(r.get("cost_usd", 0) for r in rows)
-    summary += ["", f"Total judge cost reported by the CLI: ${cost:.4f} (list-price basis)."]
+    summary += ["", f"Total judge cost: {fmt_costs(cost_by_basis(rows))}."]
     (out / "_summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     return out
 
@@ -164,7 +184,7 @@ def _runs(root: Path) -> list[dict]:
             "run_id": rows[0]["run_id"], "judge": rows[0]["judge"], "variant": variant,
             "base": variant[:-len("-blind")] if variant.endswith("-blind") else variant,
             "blind": blind, "rows": rows, "m": m, "path": p,
-            "cost": sum(r.get("cost_usd", 0) for r in rows),
+            "cost": cost_by_basis(rows),
             "invalid": m.errors > INVALID_ERR_SHARE * len(rows),
             "skills": sorted({r["skill"] for r in rows}),
         })
@@ -212,8 +232,8 @@ def summary(root: Path) -> str:
     if not runs:
         return "\n".join(L + ["No runs yet."]) + "\n"
     L += [f"{len(runs)} run(s), {sum(len(r['rows']) for r in runs)} judge call(s), "
-          f"reported judge cost ${sum(r['cost'] for r in runs):.4f} (CLI list-price basis; "
-          "ollama is local and reports 0).", "",
+          f"reported judge cost {fmt_costs(cost_by_basis([x for r in runs for x in r['rows']]))} "
+          "(ollama is local and reports 0).", "",
           "Every judge is a PROXY for Claude Code's own skill router: it reads the same names and",
           "descriptions through a simulated router prompt. Compare scores only within one judge.", ""]
 
@@ -264,11 +284,11 @@ def summary(root: Path) -> str:
             L.append(f"- `{r['run_id']}`: {r['m'].errors}/{len(r['rows'])} errored · {_err_reason(r['rows'])}")
         L.append("")
 
-    L += ["## All runs", "", "| run | judge | variant | skills | rows | F1 | errors | cost USD |",
+    L += ["## All runs", "", "| run | judge | variant | skills | rows | F1 | errors | cost |",
           "|---|---|---|---|---|---|---|---|"]
     for r in runs:
         L.append(f"| `{r['run_id']}` | {r['judge']} | {r['variant']} | {len(r['skills'])} | {len(r['rows'])} | "
-                 f"{fmt(r['m'].f1)} | {r['m'].errors} | {r['cost']:.4f} |")
+                 f"{fmt(r['m'].f1)} | {r['m'].errors} | {fmt_costs(r['cost'])} |")
     return "\n".join(L) + "\n"
 
 

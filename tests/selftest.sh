@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # selftest.sh - prove the harness does what the README says, offline (no model, no network).
 #
-# 1. Runs the unit tests (tests/test_harness.py).
+# 1. Runs the unit tests (tests/).
 # 2. Test of the test: copies the repo to a temp dir, plants one bug at a time (mutants) and
 #    asserts the unit tests now FAIL. A mutant that survives means a check that cannot fail.
 # 3. Lints the bundled example skills (examples/skills) for every seed set, read-only.
@@ -52,6 +52,21 @@ mutant "canary: agent runs outside the git sandbox" skillevals/behaviour.py 'sel
 mutant "canary: spend cap not enforced"           skillevals/behaviour.py 'if max_usd is not None and spent[0] >= max_usd:' 'if False:'
 mutant "errored run reads as a prove-can-fail PASS" skillevals/report.py 'if any(t[k]["invalid"]' 'if False and any(t[k]["invalid"]'
 mutant "canary: grader not told the agent has no tools" skillevals/behaviour.py 'Saying it has no tools is not a failure' 'Saying it is not a failure'
+mutant "api: another model's reply accepted"       skillevals/api.py 'if r.model != self.model:' 'if False:'
+mutant "api: refusal read as a verdict"            skillevals/api.py 'if r.stop_reason == "refusal":' 'if False:'
+mutant "api: truncated reply read as a verdict"    skillevals/api.py 'if r.stop_reason == "max_tokens":' 'if False:'
+mutant "prices: worst case ignores input"          skillevals/prices.py 'return calls * (input_tokens * r_cw' 'return calls * (input_tokens * 0'
+mutant "prices: preflight never refuses"           skillevals/prices.py 'if worst > max_usd:' 'if False:'
+mutant "canary: API preflight skipped"             skillevals/__main__.py '_preflight(_canary_plan(cases' '(lambda *a: None)(_canary_plan(cases'
+mutant "canary: grader calls left out of the plan" skillevals/__main__.py 'if isinstance(grader, behaviour.AnthropicGrader):' 'if False:'
+mutant "canary: unknown agent kind runs claude -p" skillevals/__main__.py 'if kind == "claude":
+        return behaviour.ClaudeAgent' 'if True:
+        return behaviour.ClaudeAgent'
+mutant "workspace: canary results written to the repo" skillevals/__main__.py 'p = behaviour.write_jsonl(rows, out)' 'p = behaviour.write_jsonl(rows, ROOT)'
+mutant "api: any other stop reason read as a verdict" skillevals/api.py 'if r.stop_reason != "end_turn":' 'if False:'
+mutant "canary: grader reads the uncut reply"      skillevals/behaviour.py 'r.text = r.text[:REPLY_CHARS]' 'pass'
+mutant "report: API and CLI costs added together"  skillevals/report.py 'basis = r.get(basis_key) or "cli-list"' 'basis = "cli-list"'
+mutant "prices: estimate counts characters, not bytes" skillevals/prices.py 'len(text.encode("utf-8"))' 'len(text)'
 
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then

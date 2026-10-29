@@ -8,6 +8,8 @@ Three judges, and every result row records which one produced it:
                    internal skill selection. Label: "claude-cli:<model>".
 - OllamaJudge     a local model (qwen3:8b) at 127.0.0.1:11434. Free and private, but a much
                    weaker, different model. Label: "ollama:<model> (PROXY)".
+- AnthropicJudge  the API through the official SDK (skillevals/api.py), billed in real dollars.
+                   Same router prompt, so still a PROXY. Label: "anthropic:<model-id>@<effort>".
 - ScriptedJudge   a deterministic fake, used by the unit tests to prove the metrics and the
                    regression logic without calling any model.
 """
@@ -61,6 +63,7 @@ class ClaudeCliJudge:
         self.model, self.per_call_usd, self.timeout = model, per_call_usd, timeout
         self.label = f"claude-cli:{model}"
         self.workers = 4
+        self.cost_basis = "cli-list"
 
     def __call__(self, system: str, prompt: str, names: set[str]) -> Verdict:
         cwd = tempfile.mkdtemp(prefix="skill-evals-judge-")  # empty dir: no project CLAUDE.md
@@ -96,6 +99,26 @@ class ClaudeCliJudge:
             return Verdict(None, text, dt, cost, f"cli error ({d.get('subtype')}): {first}")
         pick = parse_pick(text, names)
         return Verdict(pick, text, dt, cost, None if pick else "unparseable reply")
+
+
+PICK_SCHEMA = {"type": "object", "properties": {"skill": {"type": "string"}},
+               "required": ["skill"], "additionalProperties": False}
+
+
+class AnthropicJudge:
+    def __init__(self, model: str, effort: str | None = None, client=None, max_tokens: int = 4000):
+        from . import api
+        self.call = api.Caller(model, effort, max_tokens, client)
+        self.label, self.model, self.max_tokens = self.call.label, model, max_tokens
+        self.workers = 4
+        self.cost_basis = "api-usage"
+
+    def __call__(self, system: str, prompt: str, names: set[str]) -> Verdict:
+        r = self.call(system, prompt, PICK_SCHEMA)
+        if r.error:
+            return Verdict(None, r.text, r.latency_s, r.cost_usd, r.error)
+        pick = parse_pick(r.text, names)
+        return Verdict(pick, r.text, r.latency_s, r.cost_usd, None if pick else "unparseable reply")
 
 
 class OllamaJudge:
@@ -155,4 +178,8 @@ def make(spec: str):
         return OllamaJudge(model or "qwen3:8b")
     if kind == "scripted":
         return ScriptedJudge()
-    raise ValueError(f"unknown judge {spec!r} (use claude[:model], ollama[:model], scripted)")
+    if kind == "anthropic":
+        from . import api
+        return AnthropicJudge(*api.parse_spec(model or "claude-haiku-5-5"))
+    raise ValueError(f"unknown judge {spec!r} (use claude[:model], anthropic:<model-id>[@effort], "
+                     "ollama[:model], scripted)")
