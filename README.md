@@ -6,7 +6,7 @@ deterministic checks on each skill's files, and behaviour canaries for a skill t
 unattended. It reads a skills folder (`~/.claude/skills` by default, or the bundled example
 catalogue in `examples/skills` with `--skills-dir examples/skills`) and never writes there.
 
-Standard library only. Unit tests and `tests/selftest.sh` pass on Python 3.9, 3.13 and 3.14.
+Standard library only, except the optional `anthropic:` backend (`pip install anthropic`). Unit tests and `tests/selftest.sh` pass on Python 3.9, 3.13 and 3.14.
 
 ## Results (2026-10-23, bundled example catalogue)
 
@@ -103,6 +103,7 @@ python3 -m skillevals --skills-dir examples/skills lint   # deterministic checks
 | judge | what it is | cost |
 |---|---|---|
 | `claude:haiku` | `claude -p`, isolated: empty temp cwd, `--setting-sources project` (none of the user hooks fire), no tools, no MCP, slash commands disabled | uses the plan; CLI reports a list-price figure |
+| `anthropic:<model-id>[@effort]` | the Claude API through the official SDK, same router prompt, structured output; e.g. `anthropic:claude-haiku-5-5@low` | real dollars from the reply's token usage and `skillevals/prices.py` |
 | `ollama:qwen3:8b` | local model at 127.0.0.1:11434 | free, private, much weaker |
 | `scripted` | keyword-overlap fake, unit tests only | none |
 
@@ -125,6 +126,9 @@ python3 -m skillevals --skills-dir examples/skills trigger --override gen-commit
 python3 -m skillevals --skills-dir examples/skills prove-can-fail gen-commits --judge claude:haiku --blind-names
 python3 -m skillevals canary --reps 3 --max-calls 60         # behaviour canaries, example draft
 python3 -m skillevals canary --agent mutant:always-refuse --grader scripted  # must FAIL
+python3 -m skillevals --skills-dir examples/skills trigger --judge anthropic:claude-haiku-5-5@low --max-usd 0.5
+python3 -m skillevals canary --agent anthropic:claude-sonnet-5-5@low --grader anthropic:claude-fable-5-1@low --max-usd 2
+python3 -m skillevals --workspace ~/evals-private trigger --judge scripted  # results go to the workspace, not the repo
 python3 -m skillevals compare results/A.jsonl results/B.jsonl  # exit 1 on any F1 regression
 python3 -m skillevals report                                 # rebuild REPORT.md (trigger runs only)
 python3 -m skillevals history                                # rebuild HISTORY.md
@@ -133,6 +137,15 @@ bash tests/selftest.sh                                       # offline: unit tes
 
 `prove-can-fail` also works on a set's `draft` (a SKILL.md not installed yet): the draft joins
 the catalogue in memory, and its file's sha is checked before and after.
+
+The `anthropic:` backend is tested offline only (a fake client); no paid run has been made
+with it yet. Before an `anthropic:` run starts, it prices the worst case (every planned call at
+the cache-write input rate plus its full `max_tokens` of output) and refuses to start if that
+is over `--max-usd`. A refusal, a truncated reply, a reply from another model or an SDK error
+is a row error, never a verdict. Server-side model fallbacks are not used.
+
+`--workspace DIR` (before the subcommand) writes results, scorecards, `HISTORY.md` and
+`REPORT.md` under `DIR` instead of the repo. Use it for private skills and cases.
 
 ## Outputs
 
@@ -151,20 +164,21 @@ The scorecards, `REPORT.md` and `HISTORY.md` are regenerated from `results/`. Do
 
 ## Testing the tests
 
-`tests/selftest.sh` runs the unit tests. It then plants 15 known bugs (mutants) in a temp
+`tests/selftest.sh` runs the unit tests. It then plants 24 known bugs (mutants) in a temp
 copy and requires the unit tests to catch each one. Finally it lints the bundled example
 skills (`examples/skills`) read-only.
 If a mutant survives, the check it targets cannot fail.
 
 ## Security and privacy
 
-- No listener, no server. The only outbound traffic is the judge call (`claude -p` to
-  Anthropic, or ollama on loopback) and any self-test marked `network` (off by default).
+- No listener, no server. The only outbound traffic is the judge, agent or grader call
+  (`claude -p` or the API to Anthropic, or ollama on loopback) and any self-test marked `network` (off by default).
 - Nothing from a set's JSON is executed by default. A set's `selftests` are shell commands
   (`bash -c`, your user's rights, cwd `~` unless the set gives one). They run only when you pass
   `--run-selftests` to `lint` or `trigger`; otherwise lint reports them as SKIP. Read a set
   before you opt in.
-- No secrets in code or config. The Claude judge runs with the user's existing CLI login.
+- No secrets in code or config. The Claude judge runs with the user's existing CLI login;
+  the `anthropic:` backend uses whatever key or profile the SDK finds and never logs or stores it.
 - Judge calls are isolated from user settings, so no personal hooks run and no personal
   context (CLAUDE.md, memory, MCP) reaches the judge. The eval prompts are synthetic.
 - Skills are read-only: overrides and "broken" descriptions exist only in memory.

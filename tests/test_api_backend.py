@@ -19,17 +19,23 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def setUpModule():
-    """No test in this file may reach a real model: any claude -p call fails loudly."""
+    """No test in this file may reach a real model: any claude -p call or real API client fails."""
     def blocked(*a, **kw):
         raise AssertionError("a test tried to run claude -p (a real, billed call)")
+    def no_real_client(self):
+        if self._client is None:
+            raise AssertionError("a test tried to build a real API client (billed calls)")
+        return self._client
+
     global _saved
-    _saved = (behaviour._claude, judges.subprocess.run)
+    _saved = (behaviour._claude, judges.subprocess.run, api.Caller.client)
     behaviour._claude = blocked
     judges.subprocess.run = blocked
+    api.Caller.client = no_real_client
 
 
 def tearDownModule():
-    behaviour._claude, judges.subprocess.run = _saved
+    behaviour._claude, judges.subprocess.run, api.Caller.client = _saved
 
 
 EXAMPLES = str(ROOT / "examples" / "skills")
@@ -206,6 +212,20 @@ class ApiPreflight(unittest.TestCase):
                    "--agent", "anthropic:claude-haiku-5-5", "--grader", "anthropic:claude-fable-5-1",
                    "--max-usd", "0.01"])
         self.assertIn("worst case", str(cm.exception))
+
+    def test_canary_plan_has_agent_and_grader_parts(self):
+        cases = [{"id": "a", "vector": "v", "context": "c" * 100, "task": "t", "pass_if": "p"}] * 2
+        agent = behaviour.AnthropicAgent("claude-haiku-5-5", client=FakeClient())
+        grader = behaviour.AnthropicGrader("claude-fable-5-1", client=FakeClient())
+        plan = cli._canary_plan(cases, "body", agent, grader, reps=3)
+        self.assertEqual([(m, n) for m, n, _, _ in plan], [("claude-haiku-5-5", 6), ("claude-fable-5-1", 2)])
+        self.assertGreater(plan[1][2], 3 * agent.max_tokens, "grader input counts the replies it will read")
+        regrade = cli._canary_plan(cases, "body", agent, grader, reps=3, replies=["no"] * 6)
+        self.assertEqual([m for m, *_ in regrade], ["claude-fable-5-1"], "a regrade makes no agent calls")
+
+    def test_effort_suffix_reaches_the_request(self):
+        j = judges.make("anthropic:claude-opus-5-5@low")
+        self.assertEqual(j.label, "anthropic:claude-opus-5-5@low")
 
     def test_unknown_agent_or_grader_kind_is_refused(self):
         for flag, spec in (("--agent", "anthropc:claude-haiku-5-5"), ("--grader", "nope:x")):
