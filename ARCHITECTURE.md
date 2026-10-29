@@ -42,6 +42,9 @@ the bundled `examples/skills` via `--skills-dir`) and never writes there.
   fallbacks. Refusal, `max_tokens`, a reply from another model and SDK errors become row errors.
   `AnthropicJudge` (judges.py), `AnthropicAgent` and `AnthropicGrader` (behaviour.py) wrap it.
   The API agent gets the same frame as `ClaudeAgent` but no sandbox cwd.
+- Every result row records its `cost_basis` (`api-usage` or `cli-list`; canary rows one per
+  agent and grader), and `report.cost_by_basis` keeps the totals apart. Canary replies are cut
+  to `REPLY_CHARS` (4000) before grading and storing, which also bounds an API grader's input.
 - `skillevals/prices.py`: dated per-model API prices, real-dollar cost per reply, and the
   worst-case preflight that refuses an `anthropic:` run whose plan could pass `--max-usd`.
 - `skillevals/report.py`: per-skill scorecards, `HISTORY.md`, `REPORT.md` (latest baseline per

@@ -63,6 +63,10 @@ mutant "canary: unknown agent kind runs claude -p" skillevals/__main__.py 'if ki
         return behaviour.ClaudeAgent' 'if True:
         return behaviour.ClaudeAgent'
 mutant "workspace: canary results written to the repo" skillevals/__main__.py 'p = behaviour.write_jsonl(rows, out)' 'p = behaviour.write_jsonl(rows, ROOT)'
+mutant "api: any other stop reason read as a verdict" skillevals/api.py 'if r.stop_reason != "end_turn":' 'if False:'
+mutant "canary: grader reads the uncut reply"      skillevals/behaviour.py 'r.text = r.text[:REPLY_CHARS]' 'pass'
+mutant "report: API and CLI costs added together"  skillevals/report.py 'basis = r.get(basis_key) or "cli-list"' 'basis = "cli-list"'
+mutant "prices: estimate counts characters, not bytes" skillevals/prices.py 'len(text.encode("utf-8"))' 'len(text)'
 
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then

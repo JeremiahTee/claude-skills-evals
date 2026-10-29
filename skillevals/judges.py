@@ -63,6 +63,7 @@ class ClaudeCliJudge:
         self.model, self.per_call_usd, self.timeout = model, per_call_usd, timeout
         self.label = f"claude-cli:{model}"
         self.workers = 4
+        self.cost_basis = "cli-list"
 
     def __call__(self, system: str, prompt: str, names: set[str]) -> Verdict:
         cwd = tempfile.mkdtemp(prefix="skill-evals-judge-")  # empty dir: no project CLAUDE.md
@@ -110,6 +111,7 @@ class AnthropicJudge:
         self.call = api.Caller(model, effort, max_tokens, client)
         self.label, self.model, self.max_tokens = self.call.label, model, max_tokens
         self.workers = 4
+        self.cost_basis = "api-usage"
 
     def __call__(self, system: str, prompt: str, names: set[str]) -> Verdict:
         r = self.call(system, prompt, PICK_SCHEMA)

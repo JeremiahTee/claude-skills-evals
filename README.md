@@ -153,7 +153,11 @@ is a row error, never a verdict. Server-side model fallbacks are not used.
   judge, description sha, catalogue sha, cost, latency, error).
 - `results/canary/<date>/<run>.jsonl` and `scorecards/<date>/<run>.md`: one canary run (one row
   per agent reply). Canary runs stay out of `HISTORY.md` and `REPORT.md`. The agent's temp
-  sandbox path is written as `<sandbox>`, never as the machine's absolute path.
+  sandbox path is written as `<sandbox>`, never as the machine's absolute path. Each reply is
+  cut to 4000 characters before it is graded and stored, so a regrade reads exactly what the
+  first grading read.
+- Costs are kept per basis: `real dollars (API)` for `anthropic:` rows, `list price (CLI)` for
+  `claude -p` rows. Reports never add the two.
 - `scorecards/<date>/<run>/`: one markdown scorecard per skill, plus `_summary.md`.
 - `REPORT.md`: the file to read. It shows the latest full baseline per judge, the misroutes,
   the prove-can-fail verdicts and the invalid runs. A run where more than 20% of rows errored
@@ -164,7 +168,7 @@ The scorecards, `REPORT.md` and `HISTORY.md` are regenerated from `results/`. Do
 
 ## Testing the tests
 
-`tests/selftest.sh` runs the unit tests. It then plants 24 known bugs (mutants) in a temp
+`tests/selftest.sh` runs the unit tests. It then plants 28 known bugs (mutants) in a temp
 copy and requires the unit tests to catch each one. Finally it lints the bundled example
 skills (`examples/skills`) read-only.
 If a mutant survives, the check it targets cannot fail.

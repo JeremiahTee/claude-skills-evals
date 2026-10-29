@@ -40,8 +40,9 @@ def cost(model: str, usage: dict) -> float:
 
 
 def estimate_tokens(text: str) -> int:
-    """A deliberately loose upper bound (2 characters per token) for when no count is available."""
-    return math.ceil(len(text) / 2)
+    """A deliberately loose upper bound for when no count is available: 2 UTF-8 bytes per token,
+    so non-Latin text and emoji (several bytes per character) are not under-counted."""
+    return math.ceil(len(text.encode("utf-8")) / 2)
 
 
 def worst_case(model: str, calls: int, input_tokens: int, max_tokens: int) -> float:

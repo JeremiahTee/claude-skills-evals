@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from skillevals import __main__ as cli  # noqa: E402
-from skillevals import api, behaviour, judges, prices  # noqa: E402
+from skillevals import api, behaviour, judges, prices, report  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -86,7 +87,8 @@ class Prices(unittest.TestCase):
             prices.cost("claude-made-up-9", {"input_tokens": 1})
 
     def test_token_estimate_is_loose(self):
-        self.assertEqual(prices.estimate_tokens("abcde"), 3)  # ceil(5 / 2)
+        self.assertEqual(prices.estimate_tokens("abcde"), 3)  # ceil(5 bytes / 2)
+        self.assertGreaterEqual(prices.estimate_tokens("日本"), 2)  # not ASCII: count bytes
 
     def test_worst_case_prices_input_at_cache_write_and_counts_every_call(self):
         # 10 calls x (1000 in x $5 + 500 out x $20) / 1e6 on Opus 5.5
@@ -169,6 +171,15 @@ class AnthropicBackend(unittest.TestCase):
         v = self.judge(FakeClient('{"skill": "el', stop_reason="max_tokens"))("S", "p", NAMES)
         self.assertEqual((v.picked, v.error), (None, "max_tokens"))
 
+    def test_any_other_stop_reason_is_an_error(self):
+        for stop in ("pause_turn", "model_context_window_exceeded"):
+            v = self.judge(FakeClient('{"skill": "eli5"}', stop_reason=stop))("S", "p", NAMES)
+            self.assertEqual((v.picked, v.error), (None, f"stop:{stop}"))
+
+    def test_test_guard_failures_are_not_swallowed(self):
+        with self.assertRaises(AssertionError):
+            self.judge(FakeClient(raises=AssertionError("guard")))("S", "p", NAMES)
+
     def test_client_exception_is_a_row_error(self):
         v = self.judge(FakeClient(raises=RuntimeError("boom")))("S", "p", NAMES)
         self.assertIsNone(v.picked)
@@ -199,6 +210,57 @@ class AnthropicBackend(unittest.TestCase):
         self.assertIsNone(raw.error)
 
 
+class RecordingGrader:
+    calls_per_case = 0
+    label = "recording"
+    cost_basis = "none"
+
+    def __init__(self):
+        self.seen = []
+
+    def __call__(self, case, replies):
+        self.seen += replies
+        return [{"behaviour": "refuse", "meets_pass_if": True, "why": ""} for _ in replies], \
+            behaviour.Reply("", 0.0)
+
+
+class LongAgent:
+    calls_per_reply = 1
+    label = "long"
+    cost_basis = "none"
+
+    def __call__(self, system, prompt):
+        return behaviour.Reply("y" * (behaviour.REPLY_CHARS + 500), 0.0)
+
+
+class GradedText(unittest.TestCase):
+    def test_grader_reads_exactly_the_stored_reply(self):
+        cset = {"skill": "s", "canaries": [{"id": "a", "vector": "v", "expect": "refuse", "context": "c",
+                                            "task": "t", "pass_if": "p"}]}
+        g = RecordingGrader()
+        rows = behaviour.run(cset, "body", LongAgent(), g, "2026-01-01T000000-x", reps=1, progress=lambda *a: None)
+        self.assertEqual(g.seen, [rows[0]["reply"]])
+        self.assertEqual(len(rows[0]["reply"]), behaviour.REPLY_CHARS)
+
+
+class CostBasis(unittest.TestCase):
+    def test_api_and_cli_costs_are_never_added(self):
+        rows = [{"cost_usd": 1.0, "cost_basis": "api-usage"}, {"cost_usd": 2.0, "cost_basis": "cli-list"},
+                {"cost_usd": 4.0}]  # rows written before cost_basis existed are CLI list price
+        self.assertEqual(report.cost_by_basis(rows), {"api-usage": 1.0, "cli-list": 6.0})
+        text = report.fmt_costs(report.cost_by_basis(rows))
+        self.assertIn("$1.0000 real dollars (API)", text)
+        self.assertIn("$6.0000 list price (CLI)", text)
+
+    def test_rows_record_their_basis(self):
+        j = judges.AnthropicJudge("claude-haiku-5-5", client=FakeClient('{"skill": "none"}'))
+        sets = [{"skill": "eli5", "accept": [], "cases": [{"id": "x", "prompt": "p", "expect": "none"}]}]
+        from skillevals import catalogue
+        cat = catalogue.load(Path(EXAMPLES))
+        rows = cli.trigger.run(sets, j, cat, "2026-01-01T000000-x", progress=lambda *a: None)
+        self.assertEqual(rows[0]["cost_basis"], "api-usage")
+
+
 class ApiPreflight(unittest.TestCase):
     def test_trigger_refuses_before_any_call_when_worst_case_passes_cap(self):
         with self.assertRaises(SystemExit) as cm:
@@ -219,13 +281,33 @@ class ApiPreflight(unittest.TestCase):
         grader = behaviour.AnthropicGrader("claude-fable-5-1", client=FakeClient())
         plan = cli._canary_plan(cases, "body", agent, grader, reps=3)
         self.assertEqual([(m, n) for m, n, _, _ in plan], [("claude-haiku-5-5", 6), ("claude-fable-5-1", 2)])
-        self.assertGreater(plan[1][2], 3 * agent.max_tokens, "grader input counts the replies it will read")
+        self.assertGreaterEqual(plan[1][2], 3 * prices.estimate_tokens("x" * behaviour.REPLY_CHARS),
+                                "grader input counts the (cut) replies it will read")
         regrade = cli._canary_plan(cases, "body", agent, grader, reps=3, replies=["no"] * 6)
         self.assertEqual([m for m, *_ in regrade], ["claude-fable-5-1"], "a regrade makes no agent calls")
 
     def test_effort_suffix_reaches_the_request(self):
         j = judges.make("anthropic:claude-opus-5-5@low")
         self.assertEqual(j.label, "anthropic:claude-opus-5-5@low")
+        j.call._client = c = FakeClient('{"skill": "none"}')
+        j("S", "p", NAMES)
+        self.assertEqual(c.requests[0]["output_config"]["effort"], "low")
+
+    def test_cli_agent_with_api_grader_is_bounded_by_the_reply_cut(self):
+        cases = [{"id": "a", "vector": "v", "context": "c", "task": "t", "pass_if": "p"}]
+        grader = behaviour.AnthropicGrader("claude-fable-5-1", client=FakeClient())
+        plan = cli._canary_plan(cases, "body", behaviour.ClaudeAgent("opus"), grader, reps=3)
+        self.assertEqual(len(plan), 1)
+        self.assertGreaterEqual(plan[0][2], 3 * prices.estimate_tokens("x" * behaviour.REPLY_CHARS))
+
+    def test_trigger_plan_counts_the_schema(self):
+        sets = [{"skill": "eli5", "cases": [{"prompt": "explain"}]}]
+        judge = judges.AnthropicJudge("claude-haiku-5-5", client=FakeClient())
+        args = Obj(samples=1)
+        (_, _, inp, _), = cli._trigger_plan(args, sets, {}, judge, runs=1)
+        floor = (prices.estimate_tokens(judges.ROUTER_SYSTEM.format(catalogue="")) + prices.estimate_tokens("explain")
+                 + prices.estimate_tokens(json.dumps(judges.PICK_SCHEMA)))
+        self.assertGreaterEqual(inp, floor)
 
     def test_unknown_agent_or_grader_kind_is_refused(self):
         for flag, spec in (("--agent", "anthropc:claude-haiku-5-5"), ("--grader", "nope:x")):

@@ -28,10 +28,12 @@ class Result:
 
 
 class Caller:
+    cost_basis = "api-usage"
+
     def __init__(self, model: str, effort: str | None = None, max_tokens: int = 4000, client=None):
         prices._rates(model, 0)  # an unpriced model cannot run under a real-dollar cap
         if effort is not None and effort not in EFFORTS:
-            raise SystemExit(f"--effort must be one of {', '.join(EFFORTS)}")
+            raise SystemExit(f"effort (the @suffix) must be one of {', '.join(EFFORTS)}")
         self.model, self.effort, self.max_tokens, self._client = model, effort, max_tokens, client
         self.label = f"anthropic:{model}@{effort or 'default'}"
 
@@ -59,7 +61,7 @@ class Caller:
         t0 = time.time()
         try:
             r = self.client().messages.create(**req)
-        except SystemExit:
+        except (SystemExit, AssertionError):  # AssertionError: the tests' no-real-call guard
             raise
         except Exception as e:  # noqa: BLE001 - any SDK failure is reported as a row error
             status = getattr(e, "status_code", None)
@@ -76,6 +78,8 @@ class Caller:
             return Result(text, dt, cost, f"refusal:{cat or 'unspecified'}")
         if r.stop_reason == "max_tokens":
             return Result(text, dt, cost, "max_tokens")
+        if r.stop_reason != "end_turn":  # pause_turn, a context-window stop, anything new: not a full reply
+            return Result(text, dt, cost, f"stop:{r.stop_reason}")
         return Result(text, dt, cost)
 
 

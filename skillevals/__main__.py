@@ -47,10 +47,10 @@ def _trigger_plan(args, sets, cat, judge, runs: int) -> list[tuple[str, int, int
     # names padded so the bound also covers blind ids
     system = judges.ROUTER_SYSTEM.format(catalogue="\n".join(
         f"- skill-000-{s.name}: {s.description}" for s in cat.values()))
-    longest = max(len(c["prompt"]) for s in sets for c in s["cases"])
+    longest = max((c["prompt"] for s in sets for c in s["cases"]), key=lambda t: len(t.encode("utf-8")))
     calls = sum(len(s["cases"]) for s in sets) * args.samples * runs
-    return [(judge.model, calls, prices.estimate_tokens(system) + prices.estimate_tokens("x" * longest),
-             judge.max_tokens)]
+    return [(judge.model, calls, prices.estimate_tokens(system) + prices.estimate_tokens(longest)
+             + prices.estimate_tokens(json.dumps(judges.PICK_SCHEMA)), judge.max_tokens)]
 
 
 def _agent(spec: str):
@@ -83,17 +83,19 @@ def _canary_plan(cases, skill_text, agent, grader, reps: int, replies: list[str]
         return plan
     if isinstance(agent, behaviour.AnthropicAgent) and replies is None:
         system = behaviour.AGENT_FRAME.format(skill=skill_text)
-        longest = max(len(behaviour.AGENT_USER.format(context=c["context"], task=c["task"])) for c in cases)
+        longest = max(len(behaviour.AGENT_USER.format(context=c["context"], task=c["task"]).encode("utf-8"))
+                      for c in cases)
         plan.append((agent.model, len(cases) * reps, prices.estimate_tokens(system + "x" * longest),
                      agent.max_tokens))
     if isinstance(grader, behaviour.AnthropicGrader):
-        longest = max(len(grader.prompt(c, [])) for c in cases)
+        longest = max(len(grader.prompt(c, []).encode("utf-8")) for c in cases)
         if replies is not None:
             reply_tokens = prices.estimate_tokens("".join(replies))
-        else:  # replies not written yet: each can be as long as the agent's cap allows
-            reply_tokens = reps * getattr(agent, "max_tokens", 8000)
+        else:  # not written yet: every reply is cut to REPLY_CHARS before grading, whatever the agent
+            reply_tokens = reps * prices.estimate_tokens("x" * behaviour.REPLY_CHARS * 2)  # x2: non-ASCII bytes
         plan.append((grader.model, len(cases), prices.estimate_tokens(behaviour.GRADER_SYSTEM + "x" * longest)
-                     + reply_tokens, grader.max_tokens))
+                     + prices.estimate_tokens(json.dumps(behaviour.GRADES_SCHEMA)) + reply_tokens,
+                     grader.max_tokens))
     return plan
 
 
@@ -284,7 +286,7 @@ def _canary_out(rows, draft, before, out: Path) -> int:
     print(f"results:   {p.relative_to(out)}\nscorecard: {sc.relative_to(out)}")
     print(f"skill sha {before} -> {after} ({'unchanged' if before == after else 'CHANGED!'})")
     print(f"RESULT: {v['result']}  failed={v['failed_cases']}  refuse_ok={v['refuse_ok']}  "
-          f"comply_ok={v['comply_ok']}  errors={v['errors']}  ${v['cost_usd']}")
+          f"comply_ok={v['comply_ok']}  errors={v['errors']}  {report.fmt_costs(v['costs'])}")
     return {"PASS": 0, "FAIL": 1}.get(v["result"], 2)
 
 

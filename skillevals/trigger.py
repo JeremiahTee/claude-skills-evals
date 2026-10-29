@@ -114,6 +114,7 @@ def run(sets: list[dict], judge, catalogue: dict, run_id: str, variant: str = "b
             "better": c.get("better"),
             "desc_sha": cat_mod.sha(catalogue[s["skill"]].description) if s["skill"] in catalogue else None,
             "catalogue_sha": cat_sha,
+            "cost_basis": getattr(judge, "cost_basis", "none"),
         }
         if over:
             row.update(picked=None, outcome=None, error="budget cap reached", latency_s=0, cost_usd=0)
