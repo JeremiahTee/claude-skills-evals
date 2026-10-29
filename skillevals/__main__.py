@@ -29,6 +29,11 @@ BREAK_MODES = {
 }
 
 
+def _out(args) -> Path:
+    """Where results, scorecards, HISTORY.md and REPORT.md go: --workspace, else the repo."""
+    return Path(args.workspace).expanduser() if getattr(args, "workspace", None) else ROOT
+
+
 def _sets(args) -> list[dict]:
     paths = sorted((ROOT / "sets").glob("*.json")) if not args.sets else [Path(p) for p in args.sets]
     sets = [trigger.load_set(p) for p in paths]
@@ -83,14 +88,15 @@ def _trigger(args, sets, judge, cat, variant) -> list[dict]:
     run_id = trigger.new_run_id(judge.label, variant)
     print(f"run {run_id}  judge={judge.label}  cases={sum(len(s['cases']) for s in sets) * args.samples}")
     rows = trigger.run(sets, judge, cat, run_id, variant, args.max_usd, args.samples, blind=args.blind_names)
-    p = trigger.write_jsonl(rows, ROOT)
+    out = _out(args)
+    p = trigger.write_jsonl(rows, out)
     checks = [] if args.no_lint else _checks(sets, Path(args.skills_dir).expanduser(), args.network,
                                              args.run_selftests)
-    sc = report.write_scorecards(rows, checks, ROOT)
+    sc = report.write_scorecards(rows, checks, out)
     if not getattr(args, "no_report", False):
-        report.history(ROOT)
-        report.write_summary(ROOT)
-    print(f"results:    {p.relative_to(ROOT)}\nscorecards: {sc.relative_to(ROOT)}/_summary.md")
+        report.history(out)
+        report.write_summary(out)
+    print(f"results:    {p.relative_to(out)}\nscorecards: {sc.relative_to(out)}/_summary.md")
     print((sc / "_summary.md").read_text())
     return rows
 
@@ -115,12 +121,12 @@ def cmd_compare(args) -> int:
 
 
 def cmd_history(args) -> int:
-    print(report.history(ROOT))
+    print(report.history(_out(args)))
     return 0
 
 
 def cmd_report(args) -> int:
-    p = report.write_summary(ROOT)
+    p = report.write_summary(_out(args))
     print(p.read_text())
     return 0
 
@@ -188,25 +194,25 @@ def cmd_canary(args) -> int:
         rows = behaviour.regrade(old, cset, grader, run_id)
         for r in rows:
             r["date"] = run_id[:10]
-        return _canary_out(rows, draft, before)
+        return _canary_out(rows, draft, before, _out(args))
     print(f"run {run_id}  agent={agent.label}  grader={grader.label}  reps={args.reps}  skill sha {before}")
     rows = behaviour.run(cset, skill_text, agent, grader, run_id, args.reps, args.max_calls, args.case,
                          max_usd=args.max_usd)
     for r in rows:
         r["skill_sha"] = before
-    return _canary_out(rows, draft, before)
+    return _canary_out(rows, draft, before, _out(args))
 
 
-def _canary_out(rows, draft, before) -> int:
+def _canary_out(rows, draft, before, out: Path) -> int:
     run_id = rows[0]["run_id"]
-    p = behaviour.write_jsonl(rows, ROOT)
+    p = behaviour.write_jsonl(rows, out)
     v = behaviour.verdict(rows)
     md = behaviour.render(rows, v)
-    sc = ROOT / "scorecards" / rows[0]["date"] / f"{run_id}.md"
+    sc = out / "scorecards" / rows[0]["date"] / f"{run_id}.md"
     sc.parent.mkdir(parents=True, exist_ok=True)
     sc.write_text(md, encoding="utf-8")
     after = _file_sha(draft)
-    print(f"results:   {p.relative_to(ROOT)}\nscorecard: {sc.relative_to(ROOT)}")
+    print(f"results:   {p.relative_to(out)}\nscorecard: {sc.relative_to(out)}")
     print(f"skill sha {before} -> {after} ({'unchanged' if before == after else 'CHANGED!'})")
     print(f"RESULT: {v['result']}  failed={v['failed_cases']}  refuse_ok={v['refuse_ok']}  "
           f"comply_ok={v['comply_ok']}  errors={v['errors']}  ${v['cost_usd']}")
@@ -217,6 +223,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="skillevals", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--skills-dir", default=str(cat_mod.DEFAULT_SKILLS_DIR))
+    ap.add_argument("--workspace", help="write results, scorecards, HISTORY.md and REPORT.md here "
+                                        "instead of the repo (use for private skills and cases)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
