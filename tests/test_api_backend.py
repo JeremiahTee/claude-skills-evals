@@ -322,5 +322,72 @@ class ApiPreflight(unittest.TestCase):
                              "--max-usd", "0.001", "--no-lint"]), (0, 1))
 
 
+AGENT_USAGE = {"input_tokens": 700, "output_tokens": 300,
+               "cache_creation_input_tokens": 1200, "cache_read_input_tokens": 0}
+GRADER_USAGE = {"input_tokens": 2000, "output_tokens": 150,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 900}
+GRADES_TWO = ('{"grades": [{"n": 1, "behaviour": "refuse", "meets_pass_if": true, "why": "w"}, '
+              '{"n": 2, "behaviour": "refuse", "meets_pass_if": true, "why": "w"}]}')
+ONE_CASE = {"skill": "s", "canaries": [{"id": "a", "vector": "v", "expect": "refuse", "context": "c",
+                                        "task": "t", "pass_if": "p"}]}
+
+
+class TokenUsage(unittest.TestCase):
+    """Every anthropic: row records the four token counts its call was billed for."""
+
+    def test_judge_carries_all_four_counts(self):
+        v = judges.AnthropicJudge("claude-haiku-5-5", client=FakeClient('{"skill": "eli5"}', usage=AGENT_USAGE))(
+            "S", "p", NAMES)
+        self.assertEqual(v.usage, AGENT_USAGE)
+
+    def test_billed_error_keeps_its_usage(self):
+        for kw in ({"stop_reason": "max_tokens"}, {"stop_reason": "refusal"}, {"stop_reason": "pause_turn"},
+                   {"model": "claude-opus-5"}):
+            v = judges.AnthropicJudge("claude-haiku-5-5", client=FakeClient(
+                '{"skill": "el', usage=AGENT_USAGE, **kw))("S", "p", NAMES)
+            self.assertTrue(v.error, kw)
+            self.assertEqual(v.usage, AGENT_USAGE, kw)
+
+    def test_missing_count_is_stored_as_zero(self):
+        v = judges.AnthropicJudge("claude-haiku-5-5", client=FakeClient(
+            '{"skill": "eli5"}', usage=dict(AGENT_USAGE, cache_read_input_tokens=None)))("S", "p", NAMES)
+        self.assertEqual(v.usage["cache_read_input_tokens"], 0)
+
+    def test_failed_request_has_no_usage(self):
+        v = judges.AnthropicJudge("claude-haiku-5-5", client=FakeClient(raises=RuntimeError("x")))("S", "p", NAMES)
+        self.assertIsNone(v.usage)
+
+    def test_trigger_row_records_usage(self):
+        j = judges.AnthropicJudge("claude-haiku-5-5", client=FakeClient('{"skill": "none"}', usage=AGENT_USAGE))
+        sets = [{"skill": "eli5", "accept": [], "cases": [{"id": "x", "prompt": "p", "expect": "none"}]}]
+        from skillevals import catalogue
+        rows = cli.trigger.run(sets, j, catalogue.load(Path(EXAMPLES)), "2026-01-01T000000-x",
+                               progress=lambda *a: None)
+        self.assertEqual(rows[0]["usage"], AGENT_USAGE)
+
+    def test_non_api_trigger_row_has_null_usage(self):
+        from skillevals import catalogue
+        sets = [{"skill": "eli5", "accept": [], "cases": [{"id": "x", "prompt": "p", "expect": "none"}]}]
+        rows = cli.trigger.run(sets, judges.make("scripted"), catalogue.load(Path(EXAMPLES)),
+                               "2026-01-01T000000-x", progress=lambda *a: None)
+        self.assertIsNone(rows[0]["usage"])
+
+    def test_canary_rows_record_agent_and_grader_usage(self):
+        agent = behaviour.AnthropicAgent("claude-sonnet-5-5", client=FakeClient("I will not.", usage=AGENT_USAGE))
+        grader = behaviour.AnthropicGrader("claude-fable-5-1", client=FakeClient(GRADES_TWO, usage=GRADER_USAGE))
+        rows = behaviour.run(ONE_CASE, "body", agent, grader, "2026-01-01T000000-x", reps=2,
+                             progress=lambda *a: None)
+        self.assertEqual([r["agent_usage"] for r in rows], [AGENT_USAGE, AGENT_USAGE])
+        self.assertEqual([r["grader_usage"] for r in rows], [GRADER_USAGE, None],
+                         "one grader call per case: its usage sits on the first row, like its cost")
+
+    def test_regrade_records_grader_usage_and_no_agent_usage(self):
+        old = [{"run_id": "r0", "case_id": "a", "reply": "no", "error": None, "agent_usage": AGENT_USAGE}] * 2
+        grader = behaviour.AnthropicGrader("claude-opus-5-5", client=FakeClient(GRADES_TWO, usage=GRADER_USAGE))
+        new = behaviour.regrade(old, ONE_CASE, grader, "r1")
+        self.assertEqual([r["grader_usage"] for r in new], [GRADER_USAGE, None])
+        self.assertEqual([r["agent_usage"] for r in new], [None, None])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from . import prices
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
 @dataclass
@@ -25,6 +26,7 @@ class Result:
     latency_s: float
     cost_usd: float = 0.0
     error: str | None = None
+    usage: dict | None = None  # the four billed token counts (USAGE_KEYS); None if no response came back
 
 
 class Caller:
@@ -67,20 +69,19 @@ class Caller:
             status = getattr(e, "status_code", None)
             return Result("", time.time() - t0, 0.0, f"api {type(e).__name__}" + (f" {status}" if status else ""))
         dt = time.time() - t0
-        usage = {k: getattr(r.usage, k, 0) for k in ("input_tokens", "output_tokens",
-                                                     "cache_creation_input_tokens", "cache_read_input_tokens")}
+        usage = {k: getattr(r.usage, k, 0) or 0 for k in USAGE_KEYS}
         cost = prices.cost(self.model, usage)  # billed even when the reply is unusable
         text = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
         if r.model != self.model:
-            return Result(text, dt, cost, f"model mismatch: asked {self.model}, got {r.model}")
+            return Result(text, dt, cost, f"model mismatch: asked {self.model}, got {r.model}", usage)
         if r.stop_reason == "refusal":
             cat = getattr(r.stop_details, "category", None) if r.stop_details else None
-            return Result(text, dt, cost, f"refusal:{cat or 'unspecified'}")
+            return Result(text, dt, cost, f"refusal:{cat or 'unspecified'}", usage)
         if r.stop_reason == "max_tokens":
-            return Result(text, dt, cost, "max_tokens")
+            return Result(text, dt, cost, "max_tokens", usage)
         if r.stop_reason != "end_turn":  # pause_turn, a context-window stop, anything new: not a full reply
-            return Result(text, dt, cost, f"stop:{r.stop_reason}")
-        return Result(text, dt, cost)
+            return Result(text, dt, cost, f"stop:{r.stop_reason}", usage)
+        return Result(text, dt, cost, usage=usage)
 
 
 def parse_spec(spec: str) -> tuple[str, str | None]:

@@ -67,6 +67,12 @@ mutant "api: any other stop reason read as a verdict" skillevals/api.py 'if r.st
 mutant "canary: grader reads the uncut reply"      skillevals/behaviour.py 'r.text = r.text[:REPLY_CHARS]' 'pass'
 mutant "report: API and CLI costs added together"  skillevals/report.py 'basis = r.get(basis_key) or "cli-list"' 'basis = "cli-list"'
 mutant "prices: estimate counts characters, not bytes" skillevals/prices.py 'len(text.encode("utf-8"))' 'len(text)'
+mutant "api: token usage dropped from a good reply" skillevals/api.py 'return Result(text, dt, cost, usage=usage)' 'return Result(text, dt, cost)'
+mutant "api: billed error loses its token usage"    skillevals/api.py '"max_tokens", usage)' '"max_tokens")'
+mutant "trigger: row drops the judge's token usage" skillevals/trigger.py 'usage=v.usage,' 'usage=None,'
+mutant "canary: grader token usage not recorded"   skillevals/behaviour.py 'grader_usage=graw.usage)' 'grader_usage=None)'
+mutant "api: refusal loses its token usage"         skillevals/api.py 'unspecified'"'"'}", usage)' 'unspecified'"'"'}")'
+mutant "regrade: grader tokens counted on every row" skillevals/behaviour.py 'grader_usage=g.usage if i == 0 else None' 'grader_usage=g.usage'
 
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then

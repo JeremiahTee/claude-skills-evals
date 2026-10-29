@@ -43,7 +43,10 @@ the bundled `examples/skills` via `--skills-dir`) and never writes there.
   `AnthropicJudge` (judges.py), `AnthropicAgent` and `AnthropicGrader` (behaviour.py) wrap it.
   The API agent gets the same frame as `ClaudeAgent` but no sandbox cwd.
 - Every result row records its `cost_basis` (`api-usage` or `cli-list`; canary rows one per
-  agent and grader), and `report.cost_by_basis` keeps the totals apart. Canary replies are cut
+  agent and grader), and `report.cost_by_basis` keeps the totals apart. `api.Result.usage`
+  (the four billed token counts) rides through `Verdict` and `Reply` into the row as `usage`
+  (trigger) or `agent_usage` / `grader_usage` (canary; regrade rows null `agent_usage`);
+  non-API rows write `null`. Canary replies are cut
   to `REPLY_CHARS` (4000) before grading and storing, which also bounds an API grader's input.
 - `skillevals/prices.py`: dated per-model API prices, real-dollar cost per reply, and the
   worst-case preflight that refuses an `anthropic:` run whose plan could pass `--max-usd`.
