@@ -156,7 +156,7 @@ loopback for the rewrite, and written only under your workspace. Nothing leaves 
 until you have read each scrubbed case next to its raw text and accepted it.
 
 ```bash
-WS=~/evals-private                      # required; refused if it is inside the repo
+WS=~/evals-private                      # required; see the workspace rule below
 python3 -m skillevals mine --transcripts ~/.claude/projects --since 2026-10-01 --workspace $WS
 python3 -m skillevals scrub --hits $WS/mined/hits-<date>.jsonl --workspace $WS  # ollama, loopback only
 # read $WS/mined/review-<date>.md; in the .jsonl set each status: accepted | edited (+ edited_prompt) | dropped
@@ -164,23 +164,38 @@ python3 -m skillevals accept --review $WS/mined/review-<date>.jsonl --workspace 
 python3 -m skillevals --workspace $WS scrub-check $WS/sets/eli5.json   # any time; exit 1 on a match
 ```
 
-- `mine` flags three signals on the main chain (subagent turns and tool output are skipped, never
-  read as a prompt): `corrected` (a skill fired and the next typed turn starts with "no," / "nope" /
-  "not that" / "I meant", or says "wrong skill" or "that's not what I asked"), `missed` (no skill
-  fired, then you typed `/name` for a skill in `--skills-dir`) and `interrupted` (a skill fired and
-  the run was interrupted). Each hit keeps the prompt, skill, signal, file, line and timestamp.
-  Malformed lines are counted and skipped.
+- Workspace rule: `mine`, `scrub` and `accept` need `--workspace`. It is refused anywhere inside
+  this repo (compared by inode, so a case variant or a symlink of the path is still the repo), and
+  inside any other git work tree unless that repo ignores the path (`git check-ignore`). A
+  git-ignored folder in another repo is allowed. Without git, only the repo check runs.
+- `mine` flags three signals on the main chain. Subagent turns, tool output, compact summaries,
+  transcript-only lines, `isMeta` text and harness text (`<system-reminder>`, `<local-command-stdout>`)
+  are skipped and counted, never read as a prompt.
+  - `corrected`: a skill fired and the next typed turn starts with "no," / "No." / "nope" /
+    "not that" / "I meant", or says "wrong skill" or "that's not what I asked"; or the next typed
+    turn is `/other` for a different known skill (the hit records `rerouted_to`).
+  - `missed`: no skill fired, and the NEXT typed turn after the prompt is `/name` for a skill in
+    `--skills-dir`. The hit's prompt is the typed turn right before the command.
+  - `interrupted`: a skill fired and the next user turn starts with "[Request interrupted by user".
+    A skill run the user reversed in some other way is not detected.
+  Each hit keeps the prompt, skill, signal, file, line and timestamp. Malformed lines are counted
+  and skipped. `--since` compares the date part of the prompt's timestamp, which is UTC.
 - `scrub` reads `OLLAMA_HOST` and refuses anything but 127.0.0.1, localhost or ::1 (0.0.0.0 too).
-  It never starts or stops a server. The model's draft then goes through `scrub-check`; a draft
+  It ignores proxy settings (`http_proxy`, `all_proxy`, ...), so the request goes straight to
+  loopback. It never starts or stops a server, and never overwrites a review file: a second
+  run the same day writes `review-<date>-2.jsonl`. The model's draft then goes through `scrub-check`; a draft
   that fails is marked `rejected` with the rule. The proposed `expect` comes from the signal
   (`missed` -> trigger, the others -> no); you can change it in review.
-- `scrub-check` is deterministic: a secret scanner (Anthropic and other API keys, AWS keys,
-  GitHub and Slack tokens, JWTs, private key blocks, `token=`-style assignments) and a deny list
-  (emails, URLs, hostnames, IP addresses, phone numbers, paths, money, and the names in
-  `$WS/private-names.txt`, one per line, matched whole-word and case-insensitive). It names the
-  rule and never prints the match in full.
-- `accept` re-runs `scrub-check` on every accepted or edited prompt and writes nothing if any
-  fails. Accepted cases join a copy of the skill's set at `$WS/sets/<skill>.json` with
+- `scrub-check` is deterministic: a secret scanner (Anthropic, Stripe, Google, Hugging Face and
+  other API keys, AWS keys, GitHub and Slack tokens, JWTs, private key blocks, `token=` and
+  "password is" phrases, a key split by one space after its prefix) and a deny list (emails,
+  URLs, hostnames, IP addresses, phone numbers, paths, money, and the names in
+  `$WS/private-names.txt`, one per line, `#` for comments). Text is also checked after
+  normalising accents, curly quotes, dashes, whitespace and case, and names match whole-word on
+  that form. It prints the rule and the match length only, never any of the matched text.
+- `accept` checks every row for `id`, `skill`, `signal`, `expect` and `status`, re-runs
+  `scrub-check` on every accepted or edited prompt (and on any `edited_prompt`, whatever its
+  status), and writes nothing if any of that fails. Accepted cases join a copy of the skill's set at `$WS/sets/<skill>.json` with
   `"source": "mined"`. The public `sets/` files are never written.
 
 The red/green command that runs these cases is the next step and is not built yet.
@@ -214,7 +229,7 @@ The scorecards, `REPORT.md` and `HISTORY.md` are regenerated from `results/`. Do
 
 ## Testing the tests
 
-`tests/selftest.sh` runs the unit tests. It then plants 42 known bugs (mutants) in a temp
+`tests/selftest.sh` runs the unit tests. It then plants 61 known bugs (mutants) in a temp
 copy and requires the unit tests to catch each one. Finally it lints the bundled example
 skills (`examples/skills`) read-only.
 If a mutant survives, the check it targets cannot fail.

@@ -51,12 +51,16 @@ the bundled `examples/skills` via `--skills-dir`) and never writes there.
 - `skillevals/prices.py`: dated per-model API prices, real-dollar cost per reply, and the
   worst-case preflight that refuses an `anthropic:` run whose plan could pass `--max-usd`.
 - `skillevals/mine.py`: red cases from your own transcripts, the local half. `mine` walks
-  Claude Code JSONL (main chain only: sidechain turns, tool_result blocks, `isMeta` lines and
-  harness text are skipped and counted) and flags `corrected`, `missed` and `interrupted` hits
+  Claude Code JSONL (main chain only: sidechain turns, tool_result blocks, compact summaries,
+  transcript-only lines, `isMeta` lines and harness text are skipped and counted) and flags
+  `corrected` (including a `/other` re-route), `missed` and `interrupted` hits
   (`CORRECTION_PATTERNS`, `INTERRUPT_MARKER`). `scrub_check` is a deterministic secret scanner
-  plus deny list (and `private-names.txt` from the workspace) that returns rule names and masked
-  hints. `scrub` sends each hit to `OllamaScrubber`, which refuses a non-loopback `OLLAMA_HOST`
-  and never starts or stops a server, then checks the draft. `accept` re-checks every accepted
+  plus deny list (and `private-names.txt` from the workspace) that returns rule names and match
+  lengths only. `scrub` sends each hit to `OllamaScrubber`, which refuses a non-loopback
+  `OLLAMA_HOST`, uses an opener with no proxy handler, and never starts or stops a server, then
+  checks the draft. Review and hits files are never overwritten (`free_path`).
+  `workspace_problem` refuses the repo (by inode) and any other git work tree that does not
+  ignore the path. `accept` re-checks every accepted
   or edited prompt, writes nothing on any failure, and adds `"source": "mined"` cases to a copy
   of the set under `WS/sets/`.
 - `skillevals/report.py`: per-skill scorecards, `HISTORY.md`, `REPORT.md` (latest baseline per
@@ -67,7 +71,7 @@ the bundled `examples/skills` via `--skills-dir`) and never writes there.
   `canary` and `prove-can-fail` assert that the real SKILL.md sha is unchanged before and after.
   `prove-can-fail` accepts a set's `draft` as its target (via `with_drafts`).
   `mine`, `scrub` and `accept` require `--workspace` (before or after the subcommand) and refuse
-  one inside the repo; `scrub-check` reads private names from the workspace when given.
+  one inside the repo or a git work tree that does not ignore it; `scrub-check` reads private names from the workspace when given.
 
 ## Data flow
 
