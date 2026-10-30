@@ -164,6 +164,14 @@ def _overrides(args, cat) -> dict[str, str]:
     return ov
 
 
+def _written(args, p: Path) -> None:
+    """Tell a caller (models --go) that a results file exists, before the scorecard and report
+    work that could still crash: a paid run's file is then never missing from its manifest."""
+    hook = getattr(args, "on_results", None)
+    if hook:
+        hook(p)
+
+
 def _trigger(args, sets, judge, cat, variant) -> tuple[list[dict], Path]:
     if args.blind_names:
         variant += "-blind"
@@ -172,6 +180,7 @@ def _trigger(args, sets, judge, cat, variant) -> tuple[list[dict], Path]:
     rows = trigger.run(sets, judge, cat, run_id, variant, args.max_usd, args.samples, blind=args.blind_names)
     out = _out(args)
     p = trigger.write_jsonl(rows, out)
+    _written(args, p)
     checks = [] if args.no_lint else _checks(sets, Path(args.skills_dir).expanduser(), args.network,
                                              args.run_selftests)
     sc = report.write_scorecards(rows, checks, out)
@@ -303,7 +312,7 @@ def _canary(args) -> tuple[int, list[dict], Path]:
         rows = behaviour.regrade(old, cset, grader, run_id)
         for r in rows:
             r["date"] = run_id[:10]
-        return _canary_out(rows, draft, before, _out(args))
+        return _canary_out(rows, draft, before, _out(args), args)
     cases = [c for c in cset["canaries"] if not args.case or c["id"] in args.case]
     _preflight(_canary_plan(cases, skill_text, agent, grader, args.reps), args.max_usd)
     print(f"run {run_id}  agent={agent.label}  grader={grader.label}  reps={args.reps}  skill sha {before}")
@@ -311,12 +320,13 @@ def _canary(args) -> tuple[int, list[dict], Path]:
                          max_usd=args.max_usd)
     for r in rows:
         r["skill_sha"] = before
-    return _canary_out(rows, draft, before, _out(args))
+    return _canary_out(rows, draft, before, _out(args), args)
 
 
-def _canary_out(rows, draft, before, out: Path) -> tuple[int, list[dict], Path]:
+def _canary_out(rows, draft, before, out: Path, args=None) -> tuple[int, list[dict], Path]:
     run_id = rows[0]["run_id"]
     p = behaviour.write_jsonl(rows, out)
+    _written(args, p)
     v = behaviour.verdict(rows)
     md = behaviour.render(rows, v)
     sc = out / "scorecards" / rows[0]["date"] / f"{run_id}.md"
@@ -521,10 +531,21 @@ def cmd_models(args) -> int:
             step["status"] = "skipped (no graded reply to regrade)"
             save()
             continue
+        def written(p: Path, step=step) -> None:  # the paid results file exists: record it now
+            rel = str(p.relative_to(ws))
+            if any(s.get("results") == rel for s in plan["steps"] if s is not step):
+                raise RuntimeError(f"results file collision: {rel} (an earlier run's file was overwritten)")
+            step.update(results=rel, status="written")
+            save()
+
         try:
-            rows, p = _run_step(build_parser().parse_args(_step_argv(args, step, canary_results)), step)
+            step_args = build_parser().parse_args(_step_argv(args, step, canary_results))
+            step_args.on_results = written
+            rows, p = _run_step(step_args, step)
         except (Exception, SystemExit) as e:  # noqa: BLE001 - a crashed step stops the plan
-            step.update(status="crashed", error=f"{type(e).__name__}: {e}"[:300])
+            # crashed after its results file was written: the report still counts what it spent
+            status = "crashed-after-write" if step.get("results") else "crashed"
+            step.update(status=status, error=f"{type(e).__name__}: {e}"[:300])
             manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}) crashed: {step['error']}"
             if isinstance(e, AssertionError):  # also the tests' no-real-call guard: record, then re-raise
                 save()
@@ -537,12 +558,10 @@ def cmd_models(args) -> int:
             raise
         finally:
             save()
-        rel = str(p.relative_to(ws))
-        if any(s.get("results") == rel for s in plan["steps"]):  # an earlier run's file was overwritten
-            step.update(status="crashed", error=f"results file collision: {rel}")
+        if step.get("results") != str(p.relative_to(ws)):  # the run wrote without telling us
+            step.update(status="crashed", error=f"results file not recorded: {p.relative_to(ws)}")
             manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}) {step['error']}"
             break
-        step["results"] = rel
         if step["kind"] == "canary":
             canary_results, canary_rows = p, rows
         capped = sum("budget cap reached" in str(r.get("error") or "") for r in rows)

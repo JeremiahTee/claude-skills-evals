@@ -114,6 +114,8 @@ mutant "models: later steps run after a cap hit"           skillevals/__main__.p
 mutant "models: a step capped at the plan total, not its own" skillevals/__main__.py 'cap = repr(step["worst_usd"])' 'cap = repr(args.max_usd)'
 mutant "models: regrade priced as all replies in one call" skillevals/__main__.py '_canary_plan(cases, skill_text, None, g2, args.reps)' '_canary_plan(cases, skill_text, None, g2, args.reps * len(cases))'
 mutant "models: agreement counts behaviour only"           skillevals/models.py ' and g["passed"] == r["passed"]' ''
+mutant "models: paid run that crashes after writing is left out" skillevals/__main__.py '    p = trigger.write_jsonl(rows, out)
+    _written(args, p)' '    p = trigger.write_jsonl(rows, out)'
 mutant "run ids: two runs in one second share a file"      skillevals/trigger.py 'while out in _ISSUED:' 'while False:'
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then

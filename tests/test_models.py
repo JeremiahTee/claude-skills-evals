@@ -275,6 +275,30 @@ class Go(unittest.TestCase):
                          ["done", "skipped (no graded reply to regrade)", "done"])
         self.assertEqual(m["steps"][-1]["status"], "skipped (no graded reply to regrade)")
 
+    def test_crash_after_the_results_file_is_written_keeps_its_spend(self):
+        ws = tempfile.mkdtemp()
+        with mock.patch.object(cli.report, "write_scorecards", side_effect=RuntimeError("disk full")):
+            rc, _ = run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"), SmartClient())
+        self.assertEqual(rc, 1)
+        _, m = manifest(ws)
+        first = m["steps"][0]
+        self.assertEqual(first["status"], "crashed-after-write")
+        self.assertTrue((Path(ws) / first["results"]).is_file())
+        self.assertIn("disk full", first["error"])
+        self.assertEqual({s["status"] for s in m["steps"][1:]}, {"not run"})
+        text, = [p.read_text() for p in Path(ws).glob("reports/*-models.md")]
+        spend = next(l for l in text.splitlines() if l.startswith("| 1 | trigger"))
+        self.assertIn("crashed-after-write", spend)
+        self.assertIn("real dollars (API)", spend, "the paid step's spend is reported, not $0")
+
+    def test_canary_crash_after_write_is_recorded(self):
+        ws = tempfile.mkdtemp()
+        with mock.patch.object(behaviour, "render", side_effect=RuntimeError("boom")):
+            rc, _ = run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"), SmartClient())
+        _, m = manifest(ws)
+        self.assertEqual((rc, m["steps"][2]["status"]), (1, "crashed-after-write"))
+        self.assertTrue((Path(ws) / m["steps"][2]["results"]).is_file())
+
     def test_report_rebuilds_from_the_manifest(self):
         ws = tempfile.mkdtemp()
         run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"), SmartClient())
