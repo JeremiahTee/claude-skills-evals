@@ -283,8 +283,8 @@ class ApiPreflight(unittest.TestCase):
         self.assertEqual([(m, n) for m, n, _, _ in plan], [("claude-haiku-5-5", 6), ("claude-fable-5-1", 2)])
         self.assertGreaterEqual(plan[1][2], 3 * prices.estimate_tokens("x" * behaviour.REPLY_CHARS),
                                 "grader input counts the (cut) replies it will read")
-        regrade = cli._canary_plan(cases, "body", agent, grader, reps=3, replies=["no"] * 6)
-        self.assertEqual([m for m, *_ in regrade], ["claude-fable-5-1"], "a regrade makes no agent calls")
+        regrade = cli._canary_plan(cases, "body", agent, grader, reps=3, replies={"a": ["no"] * 3})
+        self.assertEqual({m for m, *_ in regrade}, {"claude-fable-5-1"}, "a regrade makes no agent calls")
 
     def test_effort_suffix_reaches_the_request(self):
         j = judges.make("anthropic:claude-opus-5-5@low")

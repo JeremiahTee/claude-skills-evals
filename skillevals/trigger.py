@@ -137,16 +137,45 @@ def run(sets: list[dict], judge, catalogue: dict, run_id: str, variant: str = "b
     return rows
 
 
+_ISSUED: set[str] = set()
+
+
+def unique_run_id(run_id: str) -> str:
+    """Run ids carry a per-second timestamp, so two runs of one judge (or agent) started in the
+    same second would share a results file and the second would overwrite the first. Within one
+    process, a repeated id gets -2, -3, ..."""
+    out, n = run_id, 1
+    while out in _ISSUED:
+        n += 1
+        out = f"{run_id}-{n}"
+    _ISSUED.add(out)
+    return out
+
+
 def new_run_id(judge_label: str, variant: str) -> str:
     slug = judge_label.split(" ")[0].replace(":", "-")
-    return f"{datetime.now():%Y-%m-%dT%H%M%S}-{slug}-{variant}"
+    return unique_run_id(f"{datetime.now():%Y-%m-%dT%H%M%S}-{slug}-{variant}")
+
+
+def write_new(d: Path, rows: list[dict]) -> Path:
+    """Write rows to d/<run_id>.jsonl, created exclusively: if another process already wrote a
+    file of that name, the run takes the id <run_id>-2, -3, ... (rows updated), never overwriting."""
+    d.mkdir(parents=True, exist_ok=True)
+    base, k = rows[0]["run_id"], 1
+    while True:
+        rid = base if k == 1 else f"{base}-{k}"
+        p = d / f"{rid}.jsonl"
+        try:
+            f = p.open("x", encoding="utf-8")
+        except FileExistsError:
+            k += 1
+            continue
+        with f:
+            for r in rows:
+                r["run_id"] = rid
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        return p
 
 
 def write_jsonl(rows: list[dict], root: Path) -> Path:
-    d = root / "results" / rows[0]["date"]
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / f"{rows[0]['run_id']}.jsonl"
-    with p.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return p
+    return write_new(root / "results" / rows[0]["date"], rows)

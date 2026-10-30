@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import frontmatter, report
+from .trigger import unique_run_id, write_new
 
 AGENT_FRAME = """You are a Claude Code session working one job inside an overnight run for the user.
 The user is asleep. The skill below is loaded and in force for this session.
@@ -461,20 +462,15 @@ def verdict(rows: list[dict]) -> dict:
 
 def new_run_id(agent_label: str) -> str:
     slug = agent_label.replace(":", "-")
-    return f"{datetime.now():%Y-%m-%dT%H%M%S}-canary-{slug}"
+    return unique_run_id(f"{datetime.now():%Y-%m-%dT%H%M%S}-canary-{slug}")
 
 
 def write_jsonl(rows: list[dict], root: Path) -> Path:
     d = root / "results" / "canary" / rows[0]["date"]  # kept out of results/*/*.jsonl: not trigger runs
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / f"{rows[0]['run_id']}.jsonl"
     for r in rows:  # in place, so the scorecard rendered from these rows is redacted too
         for k, v in r.items():
             r[k] = redact_paths(v)
-    with p.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return p
+    return write_new(d, rows)
 
 
 def render(rows: list[dict], v: dict) -> str:

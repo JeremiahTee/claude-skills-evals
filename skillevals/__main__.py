@@ -11,6 +11,7 @@
   scrub-check     deterministic secret + deny-list check of case text
   scrub           a loopback Ollama model rewrites mined hits into cases for review
   accept          reviewed cases join a copy of the skill's set under the workspace
+  models          plan (and with --go run) the anthropic: model comparison; --report rebuilds its table
 """
 from __future__ import annotations
 
@@ -22,10 +23,11 @@ import os
 import re
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from . import catalogue as cat_mod
-from . import api, behaviour, judges, lint, mine, prices, report, trigger
+from . import api, behaviour, judges, lint, mine, models, prices, report, trigger
 
 ROOT = Path(__file__).resolve().parent.parent
 BROKEN_DESC = "Use when the user wants help pricing vintage furniture."
@@ -82,8 +84,14 @@ def _grader(spec: str):
     raise SystemExit(f"unknown grader {spec!r} (use claude[:model], anthropic:<model-id>[@effort], scripted)")
 
 
-def _canary_plan(cases, skill_text, agent, grader, reps: int, replies: list[str] | None = None):
-    """Agent calls (none on a regrade) and one grader call per case, each at its worst case."""
+# One saved reply as a grader reads it: up to REPLY_CHARS characters of up to 4 UTF-8 bytes
+# each, plus its "[n]\n" header and the blank line between replies.
+REPLY_BOUND_TOKENS = prices.estimate_tokens("x" * (behaviour.REPLY_CHARS * 4 + 16))
+
+
+def _canary_plan(cases, skill_text, agent, grader, reps: int, replies: dict[str, list[str]] | None = None):
+    """Agent calls (none on a regrade) and one grader call per case, each at its worst case.
+    replies (a regrade): case id -> that case's saved replies; each grader call reads one case's."""
     plan = []
     if not cases:
         return plan
@@ -94,14 +102,17 @@ def _canary_plan(cases, skill_text, agent, grader, reps: int, replies: list[str]
         plan.append((agent.model, len(cases) * reps, prices.estimate_tokens(system + "x" * longest),
                      agent.max_tokens))
     if isinstance(grader, behaviour.AnthropicGrader):
+        schema = prices.estimate_tokens(json.dumps(behaviour.GRADES_SCHEMA))
+        if replies is not None:  # saved replies: price each case's call on its own replies
+            for c in cases:
+                plan.append((grader.model, 1, prices.estimate_tokens(
+                    behaviour.GRADER_SYSTEM + grader.prompt(c, replies.get(c["id"], []))) + schema, grader.max_tokens))
+            return plan
         longest = max(len(grader.prompt(c, []).encode("utf-8")) for c in cases)
-        if replies is not None:
-            reply_tokens = prices.estimate_tokens("".join(replies))
-        else:  # not written yet: every reply is cut to REPLY_CHARS before grading, whatever the agent
-            reply_tokens = reps * prices.estimate_tokens("x" * behaviour.REPLY_CHARS * 2)  # x2: non-ASCII bytes
+        # not written yet: every reply is cut to REPLY_CHARS before grading, whatever the agent
+        reply_tokens = reps * REPLY_BOUND_TOKENS
         plan.append((grader.model, len(cases), prices.estimate_tokens(behaviour.GRADER_SYSTEM + "x" * longest)
-                     + prices.estimate_tokens(json.dumps(behaviour.GRADES_SCHEMA)) + reply_tokens,
-                     grader.max_tokens))
+                     + schema + reply_tokens, grader.max_tokens))
     return plan
 
 
@@ -153,7 +164,15 @@ def _overrides(args, cat) -> dict[str, str]:
     return ov
 
 
-def _trigger(args, sets, judge, cat, variant) -> list[dict]:
+def _written(args, p: Path) -> None:
+    """Tell a caller (models --go) that a results file exists, before the scorecard and report
+    work that could still crash: a paid run's file is then never missing from its manifest."""
+    hook = getattr(args, "on_results", None)
+    if hook:
+        hook(p)
+
+
+def _trigger(args, sets, judge, cat, variant) -> tuple[list[dict], Path]:
     if args.blind_names:
         variant += "-blind"
     run_id = trigger.new_run_id(judge.label, variant)
@@ -161,6 +180,7 @@ def _trigger(args, sets, judge, cat, variant) -> list[dict]:
     rows = trigger.run(sets, judge, cat, run_id, variant, args.max_usd, args.samples, blind=args.blind_names)
     out = _out(args)
     p = trigger.write_jsonl(rows, out)
+    _written(args, p)
     checks = [] if args.no_lint else _checks(sets, Path(args.skills_dir).expanduser(), args.network,
                                              args.run_selftests)
     sc = report.write_scorecards(rows, checks, out)
@@ -169,10 +189,10 @@ def _trigger(args, sets, judge, cat, variant) -> list[dict]:
         report.write_summary(out)
     print(f"results:    {p.relative_to(out)}\nscorecards: {sc.relative_to(out)}/_summary.md")
     print((sc / "_summary.md").read_text())
-    return rows
+    return rows, p
 
 
-def cmd_trigger(args) -> int:
+def _run_trigger(args) -> tuple[list[dict], Path]:
     sets = _sets(args)
     cat = cat_mod.with_drafts(cat_mod.load(Path(args.skills_dir).expanduser()), sets)
     ov = _overrides(args, cat)
@@ -180,7 +200,11 @@ def cmd_trigger(args) -> int:
     judge = judges.make(args.judge)
     cat = cat_mod.with_overrides(cat, ov)
     _preflight(_trigger_plan(args, sets, cat, judge, runs=1), args.max_usd)
-    rows = _trigger(args, sets, judge, cat, variant)
+    return _trigger(args, sets, judge, cat, variant)
+
+
+def cmd_trigger(args) -> int:
+    rows, _ = _run_trigger(args)
     return 1 if any(r.get("error") == "budget cap reached" for r in rows) else 0
 
 
@@ -227,7 +251,7 @@ def cmd_prove(args) -> int:
                         (f"broken-{args.break_mode}", {args.target: BREAK_MODES[args.break_mode](cat[args.target].description)}),
                         ("restored", {})]:
         print(f"\n=== {variant}")
-        rows = _trigger(args, sets, judge, cat_mod.with_overrides(cat, ov), variant)
+        rows, _ = _trigger(args, sets, judge, cat_mod.with_overrides(cat, ov), variant)
         f1[variant] = trigger.Metrics.of(rows).f1
         errs[variant] = trigger.Metrics.of(rows).errors
     after_sha = _file_sha(real)
@@ -247,10 +271,19 @@ def cmd_prove(args) -> int:
     return 0 if ok else 1
 
 
-def cmd_canary(args) -> int:
+def _canary_inputs(args) -> tuple[dict, Path, str]:
     cset = behaviour.load(Path(args.canaries))
     draft = Path(args.skill_file).expanduser() if args.skill_file else cat_mod.resolve_draft(cset["draft"])
-    skill_text = behaviour.skill_body(draft)
+    return cset, draft, behaviour.skill_body(draft)
+
+
+def cmd_canary(args) -> int:
+    return _canary(args)[0]
+
+
+def _canary(args) -> tuple[int, list[dict], Path]:
+    """One canary run or regrade: (exit code, rows, results file)."""
+    cset, draft, skill_text = _canary_inputs(args)
     agent, grader = _agent(args.agent), _grader(args.grader)
     run_id = behaviour.new_run_id(agent.label)
     before = _file_sha(draft)
@@ -263,18 +296,23 @@ def cmd_canary(args) -> int:
             raise SystemExit(f"regrade needs one agent per results file, found {len(agents)}: {sorted(map(str, agents))}")
         ids = {r["case_id"] for r in old if not r["error"]}  # a case with no graded reply gets no grader call
         n = len(ids)
+        if not n:
+            raise SystemExit(f"regrade: no saved reply to grade in {args.regrade} (every row errored)")
         if n > args.max_calls:
             raise SystemExit(f"regrade needs {n} grader calls > cap {args.max_calls}")
+        saved: dict[str, list[str]] = {}
+        for r in old:
+            if not r["error"]:
+                saved.setdefault(r["case_id"], []).append(r.get("reply") or "")
         _preflight(_canary_plan([c for c in cset["canaries"] if c["id"] in ids], skill_text, agent, grader,
-                                args.reps, replies=[r.get("reply") or "" for r in old if not r["error"]]),
-                   args.max_usd)
+                                args.reps, replies=saved), args.max_usd)
         # named after the agent whose replies these are, not --agent (unused by a regrade)
         run_id = behaviour.new_run_id(agents.pop()).replace("-canary-", "-canary-regrade-")
         print(f"regrade {args.regrade} -> {run_id}  grader={grader.label}  ({n} grader calls, 0 agent calls)")
         rows = behaviour.regrade(old, cset, grader, run_id)
         for r in rows:
             r["date"] = run_id[:10]
-        return _canary_out(rows, draft, before, _out(args))
+        return _canary_out(rows, draft, before, _out(args), args)
     cases = [c for c in cset["canaries"] if not args.case or c["id"] in args.case]
     _preflight(_canary_plan(cases, skill_text, agent, grader, args.reps), args.max_usd)
     print(f"run {run_id}  agent={agent.label}  grader={grader.label}  reps={args.reps}  skill sha {before}")
@@ -282,12 +320,13 @@ def cmd_canary(args) -> int:
                          max_usd=args.max_usd)
     for r in rows:
         r["skill_sha"] = before
-    return _canary_out(rows, draft, before, _out(args))
+    return _canary_out(rows, draft, before, _out(args), args)
 
 
-def _canary_out(rows, draft, before, out: Path) -> int:
-    run_id = rows[0]["run_id"]
+def _canary_out(rows, draft, before, out: Path, args=None) -> tuple[int, list[dict], Path]:
     p = behaviour.write_jsonl(rows, out)
+    run_id = rows[0]["run_id"]  # after the write: an existing file of that name gives it a suffix
+    _written(args, p)
     v = behaviour.verdict(rows)
     md = behaviour.render(rows, v)
     sc = out / "scorecards" / rows[0]["date"] / f"{run_id}.md"
@@ -298,7 +337,7 @@ def _canary_out(rows, draft, before, out: Path) -> int:
     print(f"skill sha {before} -> {after} ({'unchanged' if before == after else 'CHANGED!'})")
     print(f"RESULT: {v['result']}  failed={v['failed_cases']}  refuse_ok={v['refuse_ok']}  "
           f"comply_ok={v['comply_ok']}  errors={v['errors']}  {report.fmt_costs(v['costs'])}")
-    return {"PASS": 0, "FAIL": 1}.get(v["result"], 2)
+    return {"PASS": 0, "FAIL": 1}.get(v["result"], 2), rows, p
 
 
 def _date(s: str) -> str:
@@ -371,7 +410,199 @@ def cmd_accept(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+MODELS_HELP = """Plan the three-model comparison (docs/design-api-backend.md section 2): for each model,
+--runs trigger runs with real names and --runs with blind names, one canary run with the model as
+agent graded by --grader1, and one --regrade of that canary by --grader2. Prints every planned
+run's worst case and the plan total, then exits: no model is called without --go."""
+
+
+def _count(text: str) -> int:
+    """argparse type for a run/rep/sample count: a whole number of at least 1."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {n}")
+    return n
+
+
+def _api_spec(spec: str, flag: str) -> str:
+    if not spec.startswith("anthropic:"):
+        raise SystemExit(f"models compares anthropic: specs only (priced in real dollars); {flag} got {spec!r}")
+    return spec
+
+
+def _models_plan(args) -> dict:
+    """Every run of the comparison, in order, with its worst case from the run commands' own plans."""
+    if not args.models or not args.grader1 or not args.grader2:
+        raise SystemExit("models needs --models, --grader1 and --grader2 (or --report MANIFEST)")
+    for spec in args.models:
+        _api_spec(spec, "--models")
+    g1, g2 = _grader(_api_spec(args.grader1, "--grader1")), _grader(_api_spec(args.grader2, "--grader2"))
+    sets = _sets(args)
+    cat = cat_mod.with_drafts(cat_mod.load(Path(args.skills_dir).expanduser()), sets)
+    cset, _, skill_text = _canary_inputs(args)
+    cases = cset["canaries"]
+    one_sample = argparse.Namespace(samples=1)
+    steps = []
+    for spec in args.models:
+        judge = judges.make(spec)
+        for k in range(1, args.runs + 1):
+            for names in ("real", "blind"):
+                steps.append({"kind": "trigger", "model": spec, "run": k, "names": names,
+                              "plan": _trigger_plan(one_sample, sets, cat, judge, runs=1)})
+        steps.append({"kind": "canary", "model": spec, "grader": args.grader1,
+                      "max_calls": behaviour.planned_calls(cases, _agent(spec), g1, args.reps),
+                      "plan": _canary_plan(cases, skill_text, _agent(spec), g1, args.reps)})
+        # before the replies exist: one grader call per case, each reading that case's reps replies
+        steps.append({"kind": "regrade", "model": spec, "grader": args.grader2, "max_calls": len(cases),
+                      "plan": _canary_plan(cases, skill_text, None, g2, args.reps)})
+    for s in steps:
+        s["worst_usd"] = sum(prices.worst_case(*p) for p in s["plan"])
+        s["status"] = "planned"
+    return {"steps": steps, "total": sum(s["worst_usd"] for s in steps)}
+
+
+def _print_plan(plan: dict) -> None:
+    print(f"{'step':<5} {'kind':<8} {'model':<38} {'run':<4} {'names / grader':<34} worst case")
+    for n, s in enumerate(plan["steps"], 1):
+        print(f"{n:<5} {s['kind']:<8} {s['model']:<38} {str(s.get('run', '-')):<4} "
+              f"{s.get('names') or s.get('grader'):<34} ${s['worst_usd']:.4f}")
+    print(f"plan total: ${plan['total']:.4f} (API prices as of {prices.PRICES_AS_OF}; every call at the "
+          "cache-write input rate plus its full max_tokens of output)")
+
+
+def _step_argv(args, step: dict, canary_results: Path | None) -> list[str]:
+    """The run command a step is: the existing trigger / canary / canary --regrade, capped at the
+    step's own worst case."""
+    head = ["--skills-dir", args.skills_dir, "--workspace", args.workspace]
+    cap = repr(step["worst_usd"])  # repr round-trips the float, so the run's own preflight matches
+    if step["kind"] == "trigger":
+        argv = head + ["trigger", "--judge", step["model"], "--max-usd", cap]
+        argv += ["--sets", *args.sets] if args.sets else []
+        return argv + (["--blind-names"] if step["names"] == "blind" else [])
+    argv = head + ["canary", "--canaries", args.canaries, "--grader", step["grader"], "--reps", str(args.reps),
+                   "--max-usd", cap, "--max-calls", str(step["max_calls"])]
+    argv += ["--skill-file", args.skill_file] if args.skill_file else []
+    if step["kind"] == "canary":
+        return argv + ["--agent", step["model"]]
+    return argv + ["--regrade", str(canary_results)]
+
+
+def _run_step(args, step: dict) -> tuple[list[dict], Path]:
+    if step["kind"] == "trigger":
+        return _run_trigger(args)
+    _, rows, p = _canary(args)
+    return rows, p
+
+
+def cmd_models(args) -> int:
+    if args.report:
+        p = models.write_report(Path(args.report), _out(args) if args.workspace else None)
+        print(p.read_text(encoding="utf-8"))
+        print(f"report: {p}")
+        return 0
+    plan = _models_plan(args)
+    _print_plan(plan)
+    if not args.go:
+        print("plan only: no model was called. Add --go --max-usd <total> (and --workspace DIR) to run it.")
+        return 0
+    if not args.workspace:
+        raise SystemExit("models --go needs --workspace DIR: comparison runs always write outside the repo")
+    if args.max_usd is None:
+        raise SystemExit("models --go needs --max-usd: the plan total must fit under it")
+    empty = [n for n, s in enumerate(plan["steps"], 1) if not s["worst_usd"] > 0]
+    if empty:  # every step makes paid calls; a zero or negative bound means the plan is wrong
+        raise SystemExit(f"worst case not above $0 for step(s) {empty}: refusing to start (a bad count or price?)")
+    if plan["total"] > args.max_usd:
+        raise SystemExit(f"plan total ${plan['total']:.4f} > --max-usd ${args.max_usd}: refusing to start "
+                         f"(prices as of {prices.PRICES_AS_OF}). Raise the cap or shrink the plan.")
+    ws = _out(args)
+    plan_id = f"{datetime.now():%Y-%m-%dT%H%M%S}"
+    (ws / "results" / "models").mkdir(parents=True, exist_ok=True)
+    k = 1
+    while True:  # created exclusively: another plan started this second keeps its manifest
+        mpath = ws / "results" / "models" / (f"{plan_id}.json" if k == 1 else f"{plan_id}-{k}.json")
+        try:
+            mpath.open("x", encoding="utf-8").close()
+            break
+        except FileExistsError:
+            k += 1
+    plan_id = mpath.stem
+    manifest = {"plan_id": plan_id, "models": args.models, "grader1": args.grader1, "grader2": args.grader2,
+                "runs": args.runs, "reps": args.reps, "canaries": Path(args.canaries).name,
+                "prices_as_of": prices.PRICES_AS_OF, "max_usd": args.max_usd, "total_usd": plan["total"],
+                "stopped": None, "steps": plan["steps"]}
+
+    def save():
+        mpath.write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+
+    def finish() -> Path:
+        for s in plan["steps"]:
+            if s["status"] in ("planned", "written"):
+                s["status"] = "not run" if s["status"] == "planned" else "crashed-after-write"
+        save()
+        return models.write_report(mpath, ws)
+
+    save()
+    canary_results, canary_rows = None, []
+    for n, step in enumerate(plan["steps"], 1):
+        print(f"\n=== models step {n}/{len(plan['steps'])}: {step['kind']} {step['model']} "
+              f"(cap ${step['worst_usd']:.4f})")
+        if step["kind"] == "regrade" and not any(not r["error"] for r in canary_rows):
+            # every canary row errored (an INCONCLUSIVE result, not a stop): nothing to grade, no call
+            step["status"] = "skipped (no graded reply to regrade)"
+            save()
+            continue
+        def written(p: Path, step=step) -> None:  # the paid results file exists: record it now
+            rel = str(p.relative_to(ws))
+            if any(s.get("results") == rel for s in plan["steps"] if s is not step):
+                raise RuntimeError(f"results file collision: {rel} (an earlier run's file was overwritten)")
+            step.update(results=rel, status="written")
+            save()
+
+        try:
+            step_args = build_parser().parse_args(_step_argv(args, step, canary_results))
+            step_args.on_results = written
+            rows, p = _run_step(step_args, step)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - a crashed step stops the plan
+            # crashed after its results file was written: the report still counts what it spent
+            status = "crashed-after-write" if step.get("results") else "crashed"
+            step.update(status=status, error=f"{type(e).__name__}: {e}"[:300])
+            manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}) crashed: {step['error']}"
+            if isinstance(e, AssertionError):  # also the tests' no-real-call guard: record, then re-raise
+                finish()
+                raise
+            break
+        except BaseException as e:  # Ctrl-C: record where the plan stopped, then stop
+            status = "crashed-after-write" if step.get("results") else "interrupted"
+            step.update(status=status, error=type(e).__name__)
+            manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}) interrupted"
+            finish()
+            raise
+        finally:
+            save()
+        if step.get("results") != str(p.relative_to(ws)):  # the run wrote without telling us
+            step.update(status="crashed", error=f"results file not recorded: {p.relative_to(ws)}")
+            manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}) {step['error']}"
+            break
+        if step["kind"] == "canary":
+            canary_results, canary_rows = p, rows
+        capped = sum("budget cap reached" in str(r.get("error") or "") for r in rows)
+        step["status"] = "cap" if capped else "done"
+        if capped:
+            manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}): budget cap reached on {capped} row(s)"
+            break
+        save()
+    rp = finish()
+    print(f"\nmanifest: {mpath.relative_to(ws)}\nreport:   {rp.relative_to(ws)}")
+    if manifest["stopped"]:
+        print(f"STOPPED: {manifest['stopped']}")
+    return 1 if manifest["stopped"] else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="skillevals", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--skills-dir", default=str(cat_mod.DEFAULT_SKILLS_DIR))
@@ -394,7 +625,7 @@ def main(argv=None) -> int:
                        help="claude[:model] | anthropic:<model-id>[@effort] | ollama[:model] | scripted")
         p.add_argument("--max-usd", type=float, default=1.0,
                        help="hard cap on judge spend for the run (real dollars for anthropic:)")
-        p.add_argument("--samples", type=int, default=1, help="repeat each prompt N times (flakiness)")
+        p.add_argument("--samples", type=_count, default=1, help="repeat each prompt N times (flakiness)")
         p.add_argument("--no-lint", action="store_true")
         p.add_argument("--break-mode", choices=sorted(BREAK_MODES), default="wrong")
         p.add_argument("--blind-names", action="store_true",
@@ -413,7 +644,7 @@ def main(argv=None) -> int:
     p.add_argument("--skill-file", help="SKILL.md to load as the agent's system prompt (default: the set's draft)")
     p.add_argument("--agent", default="claude:sonnet", help="claude[:model] | anthropic:<model-id>[@effort] | mutant:always-refuse | mutant:always-comply")
     p.add_argument("--grader", default="claude:haiku", help="claude[:model] | anthropic:<model-id>[@effort] | scripted")
-    p.add_argument("--reps", type=int, default=3)
+    p.add_argument("--reps", type=_count, default=3)
     p.add_argument("--max-calls", type=int, default=60, help="refuse to start if the plan needs more claude calls")
     p.add_argument("--max-usd", type=float, default=0.5,
                    help="hard stop: no new call once the run has spent this much (CLI list price; real dollars "
@@ -455,7 +686,25 @@ def main(argv=None) -> int:
     p.add_argument("--review", required=True)
     private_ws(p); p.set_defaults(fn=cmd_accept)
 
-    args = ap.parse_args(argv)
+    p = sub.add_parser("models", help="plan / run / report the anthropic: model comparison",
+                       description=MODELS_HELP)
+    p.add_argument("--models", nargs="+", help="anthropic:<model-id>@<effort> specs under test (judge and agent)")
+    p.add_argument("--grader1", help="grading 1 of every canary run (not one of the models under test)")
+    p.add_argument("--grader2", help="grading 2: a --regrade of the same replies")
+    p.add_argument("--runs", type=_count, default=2, help="trigger runs per model and names mode (default 2)")
+    p.add_argument("--reps", type=_count, default=3, help="canary reps per case (default 3)")
+    p.add_argument("--sets", nargs="*", help="eval set files (default: sets/*.json)")
+    p.add_argument("--canaries", default=str(ROOT / "canaries" / "overnight-runner.json"))
+    p.add_argument("--skill-file", help="SKILL.md for the canary agent (default: the set's draft)")
+    p.add_argument("--max-usd", type=float, help="with --go: refuse unless the plan total fits under it")
+    p.add_argument("--go", action="store_true", help="run the plan (needs --workspace and --max-usd)")
+    p.add_argument("--report", metavar="MANIFEST", help="rebuild the report from a plan manifest; no model call")
+    p.set_defaults(fn=cmd_models)
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
     return args.fn(args)
 
 

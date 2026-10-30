@@ -63,10 +63,19 @@ the bundled `examples/skills` via `--skills-dir`) and never writes there.
   ignore the path. `accept` re-checks every accepted
   or edited prompt, writes nothing on any failure, and adds `"source": "mined"` cases to a copy
   of the set under `WS/sets/`.
+- `skillevals/models.py`: the model-comparison report, rebuilt from a plan manifest
+  (`results/models/<plan-id>.json`): every trigger and canary run, the agreement of two
+  gradings by (case, rep), certification, and worst-case vs real spend per run. The `models`
+  command (`__main__.py`) plans the comparison from the `trigger`/`canary` preflight plans,
+  prints it, and only with `--go` (workspace and `--max-usd` required) runs each step through
+  those commands, each capped at its own worst case, stopping the plan on a cap hit or crash.
+  Run ids get a `-2`, `-3` suffix when two runs in one process start in the same second, and
+  results files and manifests are created exclusively (a name already on disk, e.g. from another
+  process, also gets a suffix), so no run overwrites another's file.
 - `skillevals/report.py`: per-skill scorecards, `HISTORY.md`, `REPORT.md` (latest baseline per
   judge, misroutes, prove-can-fail verdicts, invalid runs) and `compare` (which cases flipped).
-- `skillevals/__main__.py`: the CLI, with `lint`, `trigger`, `compare`, `history`, `report` and
-  `prove-can-fail`, `canary`. `trigger --no-report` leaves HISTORY.md and REPORT.md alone.
+- `skillevals/__main__.py`: the CLI, with `lint`, `trigger`, `compare`, `history`, `report`,
+  `prove-can-fail`, `canary` and `models`. `trigger --no-report` leaves HISTORY.md and REPORT.md alone.
   `--workspace DIR` sends every output under `DIR` instead of the repo.
   `canary` and `prove-can-fail` assert that the real SKILL.md sha is unchanged before and after.
   `prove-can-fail` accepts a set's `draft` as its target (via `with_drafts`).

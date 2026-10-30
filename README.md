@@ -147,6 +147,48 @@ is a row error, never a verdict. Server-side model fallbacks are not used.
 `--workspace DIR` (before the subcommand) writes results, scorecards, `HISTORY.md` and
 `REPORT.md` under `DIR` instead of the repo. Use it for private skills and cases.
 
+### `models`: the model comparison
+
+`models` plans the comparison in `docs/design-api-backend.md` section 2. For each
+`anthropic:` model it plans `--runs` trigger runs (default 2) with real names and as many with
+blind names, one canary run with that model as the agent graded by `--grader1`, and one
+`--regrade` of that canary by `--grader2`. Use the same effort suffix for every model.
+
+```bash
+python3 -m skillevals --skills-dir examples/skills models \
+  --models anthropic:claude-sonnet-5-5@medium anthropic:claude-opus-5-5@medium \
+  --grader1 anthropic:claude-fable-5-1 --grader2 anthropic:claude-opus-5-5   # plan only: no call
+python3 -m skillevals --skills-dir examples/skills --workspace ~/evals-private models ... --go --max-usd 60
+python3 -m skillevals models --report ~/evals-private/results/models/<plan-id>.json  # rebuild the report
+```
+
+- Without `--go` it prints every planned run's worst case (the same preflight numbers the
+  `trigger` and `canary` commands use) and the plan total, then exits. No model is called. The
+  regrade's worst case is per case: each grader call reads that case's `--reps` replies, each
+  cut to 4000 characters and priced at 4 bytes per character.
+- `--go` refuses before any call if `--workspace` or `--max-usd` is missing, or if the plan
+  total is over `--max-usd`. It then runs each step through the existing `trigger` and `canary`
+  commands, each with its own worst case as `--max-usd` (the trigger and canary runs also stop
+  new calls mid-run at it; a regrade is checked at its start only). A run that hits its cap
+  (`budget cap reached` rows) or crashes stops the plan: no later step starts. A canary FAIL or
+  INCONCLUSIVE is a result, not a stop; if every row of a canary run errored, its regrade is
+  skipped (nothing to grade). The worst case does not cover SDK retries of a request that
+  timed out on the client but was billed by the API, nor API-side framing tokens beyond the
+  estimate. A run that crashes after writing its results file (in lint,
+  scorecards or HISTORY) is recorded as `crashed-after-write`, its real spend is reported,
+  and the plan stops.
+- The plan manifest (`results/models/<plan-id>.json` in the workspace) lists every run and,
+  as each one finishes, its results file. The report (`reports/<plan-id>-models.md`) is
+  rebuilt from it: every trigger run (F1 per skill, errors, cost, median latency), every canary
+  run with both gradings, how many graded rows the two agree on (behaviour and passed, matched
+  by case and rep; rows that errored in the canary run are excluded and counted), the certified
+  result (PASS or FAIL only when both gradings give it and agree on every graded row; anything
+  else is "not certified"), and the spend per run: worst case against real dollars. A run that
+  stopped before writing its results file shows "unknown (up to $<ceiling>)", and the real
+  total is then labelled a lower bound.
+- Not enforced from design section 2: one effort suffix across all models, grader 1 not being
+  one of the models under test, and a prove-can-fail run per judge model (run it yourself).
+
 ## Red cases from your own transcripts (local)
 
 Build step 5's first half (docs/design-api-backend.md section 4): find prompts where a skill
@@ -210,7 +252,8 @@ The red/green command that runs these cases is the next step and is not built ye
   cut to 4000 characters before it is graded and stored, so a regrade reads exactly what the
   first grading read. A `--regrade` file is named after the source run's agent (`--agent` is
   ignored), refuses a results file that mixes agents, and skips a case whose saved replies all
-  errored (no grader call, no row).
+  errored (no grader call, no row). Its preflight prices each case's grader call on that
+  case's saved replies only.
 - Costs are kept per basis: `real dollars (API)` for `anthropic:` rows, `list price (CLI)` for
   `claude -p` rows. Reports never add the two.
 - `anthropic:` rows also keep the token counts the call was billed for (`input_tokens`,
@@ -229,7 +272,7 @@ The scorecards, `REPORT.md` and `HISTORY.md` are regenerated from `results/`. Do
 
 ## Testing the tests
 
-`tests/selftest.sh` runs the unit tests. It then plants 61 known bugs (mutants) in a temp
+`tests/selftest.sh` runs the unit tests. It then plants 81 known bugs (mutants) in a temp
 copy and requires the unit tests to catch each one. Finally it lints the bundled example
 skills (`examples/skills`) read-only.
 If a mutant survives, the check it targets cannot fail.
