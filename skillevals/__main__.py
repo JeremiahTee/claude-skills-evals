@@ -7,19 +7,25 @@
   prove-can-fail  break one description IN MEMORY, show the score drops, restore, show it recovers
   report          rebuild REPORT.md (latest baselines, prove-can-fail verdicts, invalid runs)
   canary          behaviour canaries: does an agent under a skill refuse injected asks, keep working?
+  mine            flag routing misses in your Claude Code transcripts (local; needs --workspace)
+  scrub-check     deterministic secret + deny-list check of case text
+  scrub           a loopback Ollama model rewrites mined hits into cases for review
+  accept          reviewed cases join a copy of the skill's set under the workspace
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
 from . import catalogue as cat_mod
-from . import api, behaviour, judges, lint, prices, report, trigger
+from . import api, behaviour, judges, lint, mine, prices, report, trigger
 
 ROOT = Path(__file__).resolve().parent.parent
 BROKEN_DESC = "Use when the user wants help pricing vintage furniture."
@@ -295,6 +301,76 @@ def _canary_out(rows, draft, before, out: Path) -> int:
     return {"PASS": 0, "FAIL": 1}.get(v["result"], 2)
 
 
+def _date(s: str) -> str:
+    try:
+        return dt.date.fromisoformat(s).isoformat()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {s!r}")
+
+
+def _private_ws(args) -> Path:
+    """mine/scrub/accept hold raw transcript text: a workspace is required, and never the repo."""
+    ws = getattr(args, "workspace", None)
+    if not ws:
+        raise SystemExit(f"{args.cmd}: --workspace DIR is required (raw transcript text never goes in the repo)")
+    ws = Path(ws).expanduser()
+    why = mine.workspace_problem(ws, ROOT)
+    if why:
+        raise SystemExit(f"{args.cmd}: refusing workspace {ws}: {why}; use a private folder")
+    return ws
+
+
+def cmd_mine(args) -> int:
+    ws = _private_ws(args)
+    src = Path(args.transcripts).expanduser()
+    if not src.is_dir():
+        raise SystemExit(f"transcripts folder not found: {src}")
+    known = set(cat_mod.load(_skills_dir(args)))
+    hits, stats = mine.mine(src, known, args.since)
+    p = mine.write_jsonl(mine.free_path(ws / "mined", f"hits-{mine._today()}"), hits, exclusive=True)
+    counts = {s: sum(h["signal"] == s for h in hits) for s in ("corrected", "missed", "interrupted")}
+    print(f"mined {stats['files']} files, {len(known)} known skills -> {p}")
+    print("hits: " + ", ".join(f"{k} {v}" for k, v in counts.items()) + f" (total {len(hits)})")
+    print("skipped: " + ", ".join(f"{k} {v}" for k, v in stats.items() if k != "files"))
+    return 0
+
+
+def cmd_scrub_check(args) -> int:
+    ws = getattr(args, "workspace", None)
+    names = mine.private_names(Path(ws).expanduser() if ws else None)
+    bad = 0
+    texts = mine.check_texts(Path(args.file))
+    for label, text in texts:
+        found = mine.scrub_check(text or "", names)
+        if found:
+            bad += 1
+            print(f"FAIL {label}: " + ", ".join(f"{m['rule']} {m['hint']}" for m in found))
+    print(f"scrub-check: {len(texts)} checked, {bad} failed"
+          + ("" if names else " (no private-names.txt in a --workspace: names not checked)"))
+    return 1 if bad else 0
+
+
+def cmd_scrub(args) -> int:
+    ws = _private_ws(args)
+    host = mine.check_host(os.environ.get("OLLAMA_HOST"))  # before anything reads a hit
+    model = mine.OllamaScrubber(args.model, host)
+    rows, p = mine.scrub(Path(args.hits), ws, model)
+    ok = sum(r["status"] == "pending" for r in rows)
+    print(f"scrubbed {len(rows)} hits with ollama:{args.model} at {host}: {ok} pending review, "
+          f"{len(rows) - ok} rejected\nreview: {p}\n        {p.with_suffix('.md')}")
+    return 0
+
+
+def cmd_accept(args) -> int:
+    ws = _private_ws(args)
+    added = mine.accept(Path(args.review), ws, ROOT / "sets")
+    for skill, n in added.items():
+        print(f"{skill}: {n} mined case(s) added -> {ws / 'sets' / (skill + '.json')}")
+    if not added:
+        print("accept: no accepted or edited rows")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="skillevals", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -355,6 +431,29 @@ def main(argv=None) -> int:
     p.add_argument("--min-drop", type=float, default=0.3)
     p.add_argument("--tolerance", type=float, default=0.15, help="restored may sit this far under baseline (judge noise)")
     p.set_defaults(fn=cmd_prove)
+
+    # Red cases from your own transcripts: local only, everything under a private workspace.
+    def private_ws(p):  # --workspace also accepted after the subcommand; SUPPRESS keeps a value given before it
+        p.add_argument("--workspace", default=argparse.SUPPRESS,
+                       help="private workspace (required, outside the repo)")
+
+    p = sub.add_parser("mine", help="flag routing misses in Claude Code transcripts -> WS/mined/hits-<date>.jsonl")
+    p.add_argument("--transcripts", required=True, help="folder of Claude Code *.jsonl transcripts (searched recursively)")
+    p.add_argument("--since", type=_date, help="only hits whose prompt is on or after YYYY-MM-DD")
+    private_ws(p); p.set_defaults(fn=cmd_mine)
+
+    p = sub.add_parser("scrub-check", help="deterministic secret + deny-list check of case text (exit 1 on a match)")
+    p.add_argument("file", help="a set .json, a hits/review .jsonl, or a plain-text file")
+    private_ws(p); p.set_defaults(fn=cmd_scrub_check)
+
+    p = sub.add_parser("scrub", help="a LOCAL model rewrites each hit into a case -> WS/mined/review-<date>.jsonl/.md")
+    p.add_argument("--hits", required=True)
+    p.add_argument("--model", default="qwen3:8b", help="Ollama model (loopback OLLAMA_HOST only)")
+    private_ws(p); p.set_defaults(fn=cmd_scrub)
+
+    p = sub.add_parser("accept", help="reviewed cases -> a copy of the skill's set under WS/sets/")
+    p.add_argument("--review", required=True)
+    private_ws(p); p.set_defaults(fn=cmd_accept)
 
     args = ap.parse_args(argv)
     return args.fn(args)
