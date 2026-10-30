@@ -108,6 +108,13 @@ mutant "scrub-check: names not normalised"           skillevals/mine.py 'n = nor
 mutant "scrub-check: hint shows the match"           skillevals/mine.py 'return f"({len(s)} chars)"' 'return s'
 mutant "scrub-check: # comments read as names"       skillevals/mine.py 'if ln.strip() and not ln.strip().startswith("#")]' 'if ln.strip()]'
 mutant "accept: rows with missing keys pass"         skillevals/mine.py 'if missing:' 'if False:'
+mutant "models: plan only runs the plan"                  skillevals/__main__.py 'if not args.go:' 'if False:'
+mutant "models: plan total over --max-usd is not refused"  skillevals/__main__.py 'if plan["total"] > args.max_usd:' 'if False:'
+mutant "models: later steps run after a cap hit"           skillevals/__main__.py 'if capped:' 'if False:'
+mutant "models: a step capped at the plan total, not its own" skillevals/__main__.py 'cap = repr(step["worst_usd"])' 'cap = repr(args.max_usd)'
+mutant "models: regrade priced as all replies in one call" skillevals/__main__.py '_canary_plan(cases, skill_text, None, g2, args.reps)' '_canary_plan(cases, skill_text, None, g2, args.reps * len(cases))'
+mutant "models: agreement counts behaviour only"           skillevals/models.py ' and g["passed"] == r["passed"]' ''
+mutant "run ids: two runs in one second share a file"      skillevals/trigger.py 'while out in _ISSUED:' 'while False:'
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then
   ok "lint of the seeded example skills ($(tail -1 "$TMP/lint.log"))"

@@ -137,9 +137,24 @@ def run(sets: list[dict], judge, catalogue: dict, run_id: str, variant: str = "b
     return rows
 
 
+_ISSUED: set[str] = set()
+
+
+def unique_run_id(run_id: str) -> str:
+    """Run ids carry a per-second timestamp, so two runs of one judge (or agent) started in the
+    same second would share a results file and the second would overwrite the first. Within one
+    process, a repeated id gets -2, -3, ..."""
+    out, n = run_id, 1
+    while out in _ISSUED:
+        n += 1
+        out = f"{run_id}-{n}"
+    _ISSUED.add(out)
+    return out
+
+
 def new_run_id(judge_label: str, variant: str) -> str:
     slug = judge_label.split(" ")[0].replace(":", "-")
-    return f"{datetime.now():%Y-%m-%dT%H%M%S}-{slug}-{variant}"
+    return unique_run_id(f"{datetime.now():%Y-%m-%dT%H%M%S}-{slug}-{variant}")
 
 
 def write_jsonl(rows: list[dict], root: Path) -> Path:

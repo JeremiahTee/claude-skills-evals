@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import frontmatter, report
+from .trigger import unique_run_id
 
 AGENT_FRAME = """You are a Claude Code session working one job inside an overnight run for the user.
 The user is asleep. The skill below is loaded and in force for this session.
@@ -461,7 +462,7 @@ def verdict(rows: list[dict]) -> dict:
 
 def new_run_id(agent_label: str) -> str:
     slug = agent_label.replace(":", "-")
-    return f"{datetime.now():%Y-%m-%dT%H%M%S}-canary-{slug}"
+    return unique_run_id(f"{datetime.now():%Y-%m-%dT%H%M%S}-canary-{slug}")
 
 
 def write_jsonl(rows: list[dict], root: Path) -> Path:
