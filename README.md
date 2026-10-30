@@ -147,6 +147,44 @@ is a row error, never a verdict. Server-side model fallbacks are not used.
 `--workspace DIR` (before the subcommand) writes results, scorecards, `HISTORY.md` and
 `REPORT.md` under `DIR` instead of the repo. Use it for private skills and cases.
 
+## Red cases from your own transcripts (local)
+
+Build step 5's first half (docs/design-api-backend.md section 4): find prompts where a skill
+misrouted in your own Claude Code sessions and turn them into eval cases. Mine and scrub run
+on this machine only. Raw transcript text is read here, seen only by a local Ollama model on
+loopback for the rewrite, and written only under your workspace. Nothing leaves the machine
+until you have read each scrubbed case next to its raw text and accepted it.
+
+```bash
+WS=~/evals-private                      # required; refused if it is inside the repo
+python3 -m skillevals mine --transcripts ~/.claude/projects --since 2026-10-01 --workspace $WS
+python3 -m skillevals scrub --hits $WS/mined/hits-<date>.jsonl --workspace $WS  # ollama, loopback only
+# read $WS/mined/review-<date>.md; in the .jsonl set each status: accepted | edited (+ edited_prompt) | dropped
+python3 -m skillevals accept --review $WS/mined/review-<date>.jsonl --workspace $WS
+python3 -m skillevals --workspace $WS scrub-check $WS/sets/eli5.json   # any time; exit 1 on a match
+```
+
+- `mine` flags three signals on the main chain (subagent turns and tool output are skipped, never
+  read as a prompt): `corrected` (a skill fired and the next typed turn starts with "no," / "nope" /
+  "not that" / "I meant", or says "wrong skill" or "that's not what I asked"), `missed` (no skill
+  fired, then you typed `/name` for a skill in `--skills-dir`) and `interrupted` (a skill fired and
+  the run was interrupted). Each hit keeps the prompt, skill, signal, file, line and timestamp.
+  Malformed lines are counted and skipped.
+- `scrub` reads `OLLAMA_HOST` and refuses anything but 127.0.0.1, localhost or ::1 (0.0.0.0 too).
+  It never starts or stops a server. The model's draft then goes through `scrub-check`; a draft
+  that fails is marked `rejected` with the rule. The proposed `expect` comes from the signal
+  (`missed` -> trigger, the others -> no); you can change it in review.
+- `scrub-check` is deterministic: a secret scanner (Anthropic and other API keys, AWS keys,
+  GitHub and Slack tokens, JWTs, private key blocks, `token=`-style assignments) and a deny list
+  (emails, URLs, hostnames, IP addresses, phone numbers, paths, money, and the names in
+  `$WS/private-names.txt`, one per line, matched whole-word and case-insensitive). It names the
+  rule and never prints the match in full.
+- `accept` re-runs `scrub-check` on every accepted or edited prompt and writes nothing if any
+  fails. Accepted cases join a copy of the skill's set at `$WS/sets/<skill>.json` with
+  `"source": "mined"`. The public `sets/` files are never written.
+
+The red/green command that runs these cases is the next step and is not built yet.
+
 ## Outputs
 
 - `results/<date>/<run>.jsonl`: one row per judge call (prompt, expected result, pick, outcome,
@@ -176,7 +214,7 @@ The scorecards, `REPORT.md` and `HISTORY.md` are regenerated from `results/`. Do
 
 ## Testing the tests
 
-`tests/selftest.sh` runs the unit tests. It then plants 28 known bugs (mutants) in a temp
+`tests/selftest.sh` runs the unit tests. It then plants 42 known bugs (mutants) in a temp
 copy and requires the unit tests to catch each one. Finally it lints the bundled example
 skills (`examples/skills`) read-only.
 If a mutant survives, the check it targets cannot fail.
@@ -185,6 +223,8 @@ If a mutant survives, the check it targets cannot fail.
 
 - No listener, no server. The only outbound traffic is the judge, agent or grader call
   (`claude -p` or the API to Anthropic, or ollama on loopback) and any self-test marked `network` (off by default).
+- Transcript mining is local: raw transcript text reaches only an Ollama model on loopback
+  (`scrub`), stays under `--workspace`, and is never sent to a remote model.
 - Nothing from a set's JSON is executed by default. A set's `selftests` are shell commands
   (`bash -c`, your user's rights, cwd `~` unless the set gives one). They run only when you pass
   `--run-selftests` to `lint` or `trigger`; otherwise lint reports them as SKIP. Read a set
