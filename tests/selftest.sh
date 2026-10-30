@@ -77,6 +77,14 @@ mutant "regrade: grader tokens counted on every row" skillevals/behaviour.py 'gr
 mutant "regrade: billed grader call for a case with no graded reply" skillevals/behaviour.py 'if not old:  # every' 'if False:  # every'
 mutant "regrade: file named after --agent, not the source run"       skillevals/__main__.py 'new_run_id(agents.pop())' 'new_run_id(agent.label)'
 mutant "regrade: a file with two agents is accepted"                skillevals/__main__.py 'if len(agents) != 1:' 'if False:'
+mutant "mine: OLLAMA_HOST check skipped"            skillevals/mine.py 'if u.scheme not in ("http", "https") or name not in LOOPBACK:' 'if False:'
+mutant "scrub-check: a deny class removed (email)"   skillevals/mine.py 'for name, p in SECRET_RULES + DENY_RULES]' 'for name, p in SECRET_RULES + DENY_RULES[1:]]'
+mutant "mine: tool output read as a typed prompt"    skillevals/mine.py 'return "\n".join(parts) if parts else None' 'return "\n".join(parts) if parts else str(content)'
+mutant "mine: subagent turns read as the user's"     skillevals/mine.py 'if d.get("isSidechain"):' 'if False:'
+mutant "mine: \"no worries\" read as a correction"   skillevals/mine.py 'r"^\s*(no|nope)\s*([,.!;:]|$)"' 'r"^\s*(no|nope)\b"'
+mutant "accept: edited prompt not re-checked"        skillevals/mine.py 'found = scrub_check(text, names)' 'found = []'
+mutant "accept: writes the public sets/"             skillevals/mine.py 'dest = Path(ws) / "sets" / f"{skill}.json"' 'dest = Path(public_sets) / f"{skill}.json"'
+mutant "mine: workspace inside the repo allowed"     skillevals/__main__.py 'if mine.is_inside(ws, ROOT):' 'if False:'
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then
   ok "lint of the seeded example skills ($(tail -1 "$TMP/lint.log"))"
