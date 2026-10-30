@@ -155,7 +155,9 @@ is a row error, never a verdict. Server-side model fallbacks are not used.
   per agent reply). Canary runs stay out of `HISTORY.md` and `REPORT.md`. The agent's temp
   sandbox path is written as `<sandbox>`, never as the machine's absolute path. Each reply is
   cut to 4000 characters before it is graded and stored, so a regrade reads exactly what the
-  first grading read.
+  first grading read. A `--regrade` file is named after the source run's agent (`--agent` is
+  ignored), refuses a results file that mixes agents, and skips a case whose saved replies all
+  errored (no grader call, no row).
 - Costs are kept per basis: `real dollars (API)` for `anthropic:` rows, `list price (CLI)` for
   `claude -p` rows. Reports never add the two.
 - `anthropic:` rows also keep the token counts the call was billed for (`input_tokens`,

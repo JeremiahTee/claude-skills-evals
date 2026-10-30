@@ -252,13 +252,18 @@ def cmd_canary(args) -> int:
         old = report.load_rows(Path(args.regrade))
         if args.case:
             old = [r for r in old if r["case_id"] in args.case]
-        n = len({r["case_id"] for r in old})
+        agents = {r.get("agent") for r in old}
+        if len(agents) != 1:
+            raise SystemExit(f"regrade needs one agent per results file, found {len(agents)}: {sorted(map(str, agents))}")
+        ids = {r["case_id"] for r in old if not r["error"]}  # a case with no graded reply gets no grader call
+        n = len(ids)
         if n > args.max_calls:
             raise SystemExit(f"regrade needs {n} grader calls > cap {args.max_calls}")
-        ids = {r["case_id"] for r in old}
         _preflight(_canary_plan([c for c in cset["canaries"] if c["id"] in ids], skill_text, agent, grader,
-                                args.reps, replies=[r.get("reply") or "" for r in old]), args.max_usd)
-        run_id = run_id.replace("-canary-", "-canary-regrade-")
+                                args.reps, replies=[r.get("reply") or "" for r in old if not r["error"]]),
+                   args.max_usd)
+        # named after the agent whose replies these are, not --agent (unused by a regrade)
+        run_id = behaviour.new_run_id(agents.pop()).replace("-canary-", "-canary-regrade-")
         print(f"regrade {args.regrade} -> {run_id}  grader={grader.label}  ({n} grader calls, 0 agent calls)")
         rows = behaviour.regrade(old, cset, grader, run_id)
         for r in rows:
@@ -338,7 +343,7 @@ def main(argv=None) -> int:
                    help="hard stop: no new call once the run has spent this much (CLI list price; real dollars "
                         "for anthropic:, which also refuses to start if the worst case is over it)")
     p.add_argument("--case", nargs="*", help="only these canary ids")
-    p.add_argument("--regrade", help="results .jsonl: grade its saved replies again (no agent calls)")
+    p.add_argument("--regrade", help="results .jsonl: grade its saved replies again (no agent calls; --agent is ignored)")
     p.set_defaults(fn=cmd_canary)
 
     p = sub.add_parser("compare"); p.add_argument("a"); p.add_argument("b"); p.set_defaults(fn=cmd_compare)
