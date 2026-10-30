@@ -418,6 +418,8 @@ def regrade(rows: list[dict], cset: dict, grader, run_id: str) -> list[dict]:
     out = []
     for cid in dict.fromkeys(r["case_id"] for r in rows):
         old = [r for r in rows if r["case_id"] == cid and not r["error"]]
+        if not old:  # every saved reply errored: nothing to grade, so no billed grader call
+            continue
         grades, g = grader(cases[cid], [r["reply"] for r in old])
         for i, r in enumerate(old):
             new = dict(r, run_id=run_id, grader=grader.label, regraded_from=r["run_id"],

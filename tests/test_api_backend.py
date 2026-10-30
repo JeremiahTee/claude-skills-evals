@@ -389,5 +389,53 @@ class TokenUsage(unittest.TestCase):
         self.assertEqual([r["agent_usage"] for r in new], [None, None])
 
 
+
+class CountingGrader(behaviour.ScriptedGrader):
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, case, replies):
+        self.calls += 1
+        return super().__call__(case, replies)
+
+
+class Regrade(unittest.TestCase):
+    def canary_file(self, ws: str) -> Path:
+        quiet(["--skills-dir", EXAMPLES, "--workspace", ws, "canary", "--agent", "mutant:always-refuse",
+               "--grader", "scripted"])
+        f, = Path(ws).glob("results/canary/*/*.jsonl")
+        return f
+
+    def test_case_with_no_graded_reply_makes_no_grader_call(self):
+        rows = [{"run_id": "r0", "case_id": "a", "reply": "", "error": "refusal:cyber"},
+                {"run_id": "r0", "case_id": "b", "reply": "no", "error": None}]
+        cset = {"skill": "s", "canaries": [dict(ONE_CASE["canaries"][0], id=i) for i in ("a", "b")]}
+        g = CountingGrader()
+        new = behaviour.regrade(rows, cset, g, "r1")
+        self.assertEqual(g.calls, 1, "case a had only errored rows: nothing to grade, nothing to bill")
+        self.assertEqual([r["case_id"] for r in new], ["b"])
+
+    def test_regrade_file_is_named_after_the_source_agent_not_the_flag(self):
+        ws = tempfile.mkdtemp()
+        f = self.canary_file(ws)
+        rows = [dict(json.loads(l), agent="anthropic:claude-opus-5-5@medium") for l in f.read_text().splitlines()]
+        f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        quiet(["--skills-dir", EXAMPLES, "--workspace", ws, "canary", "--regrade", str(f), "--grader", "scripted",
+               "--agent", "anthropic:claude-sonnet-5-5"])
+        out = [p.name for p in Path(ws).glob("results/canary/*/*regrade*.jsonl")]
+        self.assertEqual(len(out), 1)
+        self.assertIn("claude-opus-5-5", out[0])
+        self.assertNotIn("sonnet", out[0])
+
+    def test_regrade_refuses_a_file_with_two_agents(self):
+        ws = tempfile.mkdtemp()
+        f = self.canary_file(ws)
+        lines = f.read_text().splitlines()
+        rows = [dict(json.loads(l), agent=("a" if i % 2 else "b")) for i, l in enumerate(lines)]
+        f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        with self.assertRaises(SystemExit) as cm:
+            quiet(["--skills-dir", EXAMPLES, "--workspace", ws, "canary", "--regrade", str(f), "--grader", "scripted"])
+        self.assertIn("agent", str(cm.exception))
+
 if __name__ == "__main__":
     unittest.main()

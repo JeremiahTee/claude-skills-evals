@@ -74,6 +74,9 @@ mutant "canary: grader token usage not recorded"   skillevals/behaviour.py 'grad
 mutant "api: refusal loses its token usage"         skillevals/api.py 'unspecified'"'"'}", usage)' 'unspecified'"'"'}")'
 mutant "regrade: grader tokens counted on every row" skillevals/behaviour.py 'grader_usage=g.usage if i == 0 else None' 'grader_usage=g.usage'
 
+mutant "regrade: billed grader call for a case with no graded reply" skillevals/behaviour.py 'if not old:  # every' 'if False:  # every'
+mutant "regrade: file named after --agent, not the source run"       skillevals/__main__.py 'new_run_id(agents.pop())' 'new_run_id(agent.label)'
+mutant "regrade: a file with two agents is accepted"                skillevals/__main__.py 'if len(agents) != 1:' 'if False:'
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then
   ok "lint of the seeded example skills ($(tail -1 "$TMP/lint.log"))"
