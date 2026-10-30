@@ -314,8 +314,9 @@ def _private_ws(args) -> Path:
     if not ws:
         raise SystemExit(f"{args.cmd}: --workspace DIR is required (raw transcript text never goes in the repo)")
     ws = Path(ws).expanduser()
-    if mine.is_inside(ws, ROOT):
-        raise SystemExit(f"{args.cmd}: refusing workspace {ws}: it is inside the repo; use a private folder")
+    why = mine.workspace_problem(ws, ROOT)
+    if why:
+        raise SystemExit(f"{args.cmd}: refusing workspace {ws}: {why}; use a private folder")
     return ws
 
 
@@ -326,7 +327,7 @@ def cmd_mine(args) -> int:
         raise SystemExit(f"transcripts folder not found: {src}")
     known = set(cat_mod.load(_skills_dir(args)))
     hits, stats = mine.mine(src, known, args.since)
-    p = mine.write_jsonl(ws / "mined" / f"hits-{mine._today()}.jsonl", hits)
+    p = mine.write_jsonl(mine.free_path(ws / "mined", f"hits-{mine._today()}"), hits, exclusive=True)
     counts = {s: sum(h["signal"] == s for h in hits) for s in ("corrected", "missed", "interrupted")}
     print(f"mined {stats['files']} files, {len(known)} known skills -> {p}")
     print("hits: " + ", ".join(f"{k} {v}" for k, v in counts.items()) + f" (total {len(hits)})")

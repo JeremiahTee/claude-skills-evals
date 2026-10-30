@@ -15,7 +15,10 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import os
 import re
+import subprocess
+import unicodedata
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -89,6 +92,9 @@ def _events(path: Path, stats: dict):
             if d.get("isSidechain"):
                 stats["sidechain"] += 1  # a subagent's turn: never a prompt, never a signal
                 continue
+            if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
+                stats["compact_or_transcript_only"] += 1  # a summary or display line, not typed now
+                continue
             if d.get("isMeta"):
                 stats["meta"] += 1  # text the harness injected (e.g. a skill body), not typed
                 continue
@@ -112,12 +118,13 @@ def _events(path: Path, stats: dict):
                 yield n, "prompt", text.strip(), d
 
 
-def _hit(signal, skill, prompt, root: Path, path: Path, evidence: int) -> dict:
+def _hit(signal, skill, prompt, root: Path, path: Path, evidence: int, **extra) -> dict:
     line, text, d = prompt
     src = path.relative_to(root).as_posix()
     hid = hashlib.sha256(f"{src}:{line}:{signal}:{skill}".encode()).hexdigest()[:12]
     return {"id": hid, "signal": signal, "skill": skill, "prompt": text, "source": src, "line": line,
-            "evidence_line": evidence, "timestamp": d.get("timestamp"), "session_id": d.get("sessionId")}
+            "evidence_line": evidence, "timestamp": d.get("timestamp"), "session_id": d.get("sessionId"),
+            **extra}
 
 
 def mine_file(path: Path, root: Path, known: set[str], stats: dict) -> list[dict]:
@@ -135,8 +142,11 @@ def mine_file(path: Path, root: Path, known: set[str], stats: dict) -> list[dict
                 fired = None  # one hit per run
             continue
         if kind == "command":
+            # `prompt` is always the last typed turn, so /name here is the NEXT typed turn after it
             if prompt and fired is None and val in known:
                 hits.append(_hit("missed", val, prompt, root, path, n))
+            elif prompt and fired and val in known and val != fired:
+                hits.append(_hit("corrected", fired, prompt, root, path, n, rerouted_to=val))
             prompt, fired = None, None  # the user routed it by hand: not a routing event
             continue
         # a typed prompt: it may correct the skill that just fired, then it starts a new turn
@@ -147,7 +157,8 @@ def mine_file(path: Path, root: Path, known: set[str], stats: dict) -> list[dict
 
 
 def new_stats() -> dict:
-    return {"files": 0, "malformed": 0, "other_types": 0, "sidechain": 0, "meta": 0,
+    return {"files": 0, "malformed": 0, "other_types": 0, "sidechain": 0, "compact_or_transcript_only": 0,
+            "meta": 0,
             "tool_output": 0, "harness_text": 0, "unreadable_files": 0}
 
 
@@ -179,6 +190,13 @@ SECRET_RULES = [
     ("secret:jwt", r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\."),
     ("secret:bearer", r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{16,}"),
     ("secret:assignment", r"(?i)\b(api[_-]?key|token|secret|passw(or)?d|pwd)\s*[:=]\s*\S{6,}"),
+    ("secret:stripe-key", r"\b[sr]k_(live|test)_[A-Za-z0-9]{10,}"),
+    ("secret:google-key", r"\bAIza[0-9A-Za-z_-]{30,}"),
+    ("secret:hf-token", r"\bhf_[A-Za-z0-9]{20,}"),
+    ("secret:password-is", r"(?i)\b(password|passphrase|passcode)\s+(is|was)\s+\S+"),
+    # a known key prefix, one space, then the key body (a paste split by a line wrap)
+    ("secret:split-key", r"(?<![A-Za-z0-9])(sk-ant-|sk-|[sr]k_(live|test)_|gh[pousr]_|github_pat_|AKIA|ASIA|"
+                         r"xox[abprs]-|hf_|AIza)\s[A-Za-z0-9_-]{16,}"),
 ]
 _TLDS = ("com|net|org|io|dev|ai|app|co|ca|uk|us|de|fr|eu|me|info|biz|xyz|cloud|local|internal|"
          "lan|tech|site|online|gg|tv|ly")
@@ -186,30 +204,47 @@ DENY_RULES = [
     ("deny:email", r"[\w.+-]+@[\w-]+(\.[\w-]+)+"),
     ("deny:url", r"(?i)\b([a-z][a-z0-9+.-]*://\S+|www\.\S+)"),
     ("deny:ip-address", r"\b\d{1,3}(\.\d{1,3}){3}\b"),
-    ("deny:hostname", rf"(?i)\b([a-z0-9-]+\.)+({_TLDS})\b|\blocalhost\b"),
-    ("deny:phone", r"(?<![\w.])(\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b"),
-    ("deny:path", r"(?<![\w/])(~|\.\.?)?/[\w.-]+/[\w./-]*|(?<![\w/])~/[\w.-]+|\b[A-Za-z]:\\\S+"),
-    ("deny:money", r"(?i)[$€£¥]\s?\d|\d\s?[$€£¥]|\b\d+(?:[.,]\d+)?\s?(usd|cad|eur|gbp|dollars?|bucks)\b"),
+    # any TLD from the list, or any word.tld followed by a /path
+    ("deny:hostname", rf"(?i)\b([a-z0-9-]+\.)+({_TLDS})\b|\blocalhost\b|\b([a-z0-9-]+\.)+[a-z]{{2,}}/\S+"),
+    ("deny:phone", r"(?<![\w.])(\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b"
+                   r"|\+\d{1,3}[\s.-]?\d{1,4}(?:[\s.-]?\d{2,4}){2,}|(?<!\d)\d{10,}(?!\d)"),
+    ("deny:path", r"(?<![\w/])(~|\.\.?)?/[\w.-]+/[\w./-]*|(?<![\w/])~[\w.-]*/[\w.-]*|\b[A-Za-z]:\\\S+"
+                  r"|\\\\[\w.$-]+\\[\w.$-]+"),
+    ("deny:money", r"(?i)[$€£¥₹]\s?\d|\d\s?[$€£¥₹]|\b(usd|cad|eur|gbp|chf|aud|jpy|inr)\s?\d"
+                   r"|\b\d+(?:[.,]\d+)?\s?(usd|cad|eur|gbp|chf|aud|jpy|inr|dollars?|euros?|bucks|cents?)\b"),
 ]
 _RULES = [(name, re.compile(p)) for name, p in SECRET_RULES + DENY_RULES]
 
 
-def _mask(s: str) -> str:
-    return f"{s[:2]}... ({len(s)} chars)" if len(s) > 4 else f"({len(s)} chars)"
+_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201b": "'", "\u2032": "'", "\u00b4": "'",
+                        "`": "'", "\u201c": '"', "\u201d": '"', "\u2010": "-", "\u2011": "-", "\u2012": "-",
+                        "\u2013": "-", "\u2014": "-", "\u2015": "-", "\u2212": "-", "\u00ad": ""})
+
+
+def normalise(text: str) -> str:
+    """NFKD, accents stripped, curly quotes and dashes made plain, whitespace runs collapsed, casefolded."""
+    t = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", t.translate(_QUOTES)).casefold()
+
+
+def _hint(s: str) -> str:
+    return f"({len(s)} chars)"  # rule + length only: no character of a match is ever shown
 
 
 def scrub_check(text: str, private_names=()) -> list[dict]:
-    """[] when the text is clean; else one {"rule", "hint"} per rule that matched (hint masked)."""
+    """[] when the text is clean; else one {"rule", "hint"} per rule that matched.
+    Rules run on the raw text and on its normalised form."""
     out = []
+    norm = normalise(text)
     for name, rx in _RULES:
-        m = rx.search(text)
+        m = rx.search(text) or rx.search(norm)
         if m:
-            hint = f"({len(m.group(0))} chars)" if name.startswith("secret:") else _mask(m.group(0))
-            out.append({"rule": name, "hint": hint})
+            out.append({"rule": name, "hint": _hint(m.group(0))})
     for nm in private_names:
-        m = re.search(rf"(?<!\w){re.escape(nm)}(?!\w)", text, re.I)
+        n = normalise(nm).strip()
+        m = n and re.search(rf"(?<!\w){re.escape(n)}(?!\w)", norm)
         if m:
-            out.append({"rule": "deny:private-name", "hint": _mask(m.group(0))})
+            out.append({"rule": "deny:private-name", "hint": _hint(m.group(0))})
             break
     return out
 
@@ -282,8 +317,11 @@ class OllamaScrubber:
     """Calls a local Ollama model. The host is checked again here, so no caller can skip it.
     It never starts or stops a server: start `ollama serve` (bound to 127.0.0.1) yourself."""
 
-    def __init__(self, model: str, host: str, timeout: int = 300):
+    def __init__(self, model: str, host: str, timeout: int = 300, opener=None):
         self.model, self.host, self.timeout = model, check_host(host), timeout
+        # ProxyHandler({}): no proxy at all. urlopen would honour http_proxy / all_proxy, and
+        # proxy_bypass does not exempt 127.0.0.1, so raw text would go to the proxy.
+        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def __call__(self, prompt: str, skill: str, signal: str) -> str:
         body = json.dumps({
@@ -295,8 +333,10 @@ class OllamaScrubber:
         req = urllib.request.Request(f"{self.host}/api/chat", data=body,
                                      headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with self.opener.open(req, timeout=self.timeout) as r:
                 text = json.loads(r.read()).get("message", {}).get("content", "")
+        except AssertionError:
+            raise  # a test guard, never a row error
         except Exception as e:  # noqa: BLE001 - any transport failure is a rejected row
             raise ScrubError(f"ollama: {e}") from e
         try:
@@ -321,9 +361,19 @@ def read_jsonl(p: Path) -> list[dict]:
     return [json.loads(line) for line in Path(p).read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def write_jsonl(p: Path, rows: list[dict]) -> Path:
+def free_path(folder: Path, stem: str) -> Path:
+    """folder/stem.jsonl, or stem-2, stem-3, ... so a file the owner may be editing is never replaced."""
+    n = 1
+    while True:
+        p = folder / (f"{stem}.jsonl" if n == 1 else f"{stem}-{n}.jsonl")
+        if not p.exists() and not p.with_suffix(".md").exists():
+            return p
+        n += 1
+
+
+def write_jsonl(p: Path, rows: list[dict], exclusive: bool = False) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
+    with open(p, "x" if exclusive else "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     return p
@@ -345,8 +395,9 @@ def scrub(hits_file: Path, ws: Path, model_call) -> tuple[list[dict], Path]:
                     "scrub_check": {"ok": not found, "rules": found},
                     "status": "pending" if not found else "rejected"})
         rows.append(row)
-    out = write_jsonl(Path(ws) / "mined" / f"review-{_today()}.jsonl", rows)
-    out.with_suffix(".md").write_text(render_review(rows), encoding="utf-8")
+    out = write_jsonl(free_path(Path(ws) / "mined", f"review-{_today()}"), rows, exclusive=True)
+    with open(out.with_suffix(".md"), "x", encoding="utf-8") as f:
+        f.write(render_review(rows))
     return rows, out
 
 
@@ -369,6 +420,7 @@ def render_review(rows: list[dict]) -> str:
 # ---------------------------------------------------------------- accept
 
 STATUSES = ("pending", "rejected", "accepted", "edited", "dropped")
+REQUIRED_KEYS = ("id", "skill", "signal", "expect", "status")
 _SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
@@ -382,6 +434,12 @@ def accept(review: Path, ws: Path, public_sets: Path) -> dict[str, int]:
     rows = read_jsonl(review)
     names = private_names(ws)
     problems, take = [], []
+    for i, r in enumerate(rows, 1):
+        missing = [k for k in REQUIRED_KEYS if not isinstance(r, dict) or k not in r]
+        if missing:
+            problems.append(f"row {i}: missing {', '.join(missing)}")
+    if problems:
+        raise SystemExit("accept refused, nothing written:\n  " + "\n  ".join(problems))
     for r in rows:
         st = r.get("status")
         if st not in STATUSES:
@@ -431,6 +489,50 @@ def accept(review: Path, ws: Path, public_sets: Path) -> dict[str, int]:
     return added
 
 
+def _nearest_existing(p: Path) -> tuple[Path, Path]:
+    """(real path of the nearest existing ancestor, the not-yet-existing rest)."""
+    p = Path(os.path.abspath(os.path.expanduser(str(p))))  # lexical: collapses ".."
+    rest = []
+    while not p.exists() and p != p.parent:
+        rest.append(p.name)
+        p = p.parent
+    return Path(os.path.realpath(p)), Path(*reversed(rest)) if rest else Path()
+
+
 def is_inside(p: Path, root: Path) -> bool:
-    p, root = Path(p).expanduser().resolve(), Path(root).resolve()
-    return p == root or root in p.parents
+    """By inode, not by name: a case variant (APFS) or a symlink of the repo is still the repo."""
+    r = os.stat(root)
+    key = (r.st_dev, r.st_ino)
+    anc, _ = _nearest_existing(p)
+    for a in (anc, *anc.parents):
+        st = os.stat(a)
+        if (st.st_dev, st.st_ino) == key:
+            return True
+    return False
+
+
+def workspace_problem(ws: Path, root: Path) -> str | None:
+    """Why a workspace may not hold raw transcript text, or None. Refused: anywhere in this repo,
+    and any path inside another git work tree that the repo does not ignore (it could be committed).
+    Without git, only the repo check runs."""
+    if is_inside(ws, root):
+        return "it is inside the repo"
+    anc, rest = _nearest_existing(ws)
+    try:
+        top = subprocess.run(["git", "-C", str(anc), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if top.returncode != 0 or not top.stdout.strip():
+        return None  # not in a work tree
+    toplevel = Path(os.path.realpath(top.stdout.strip()))
+    target = anc / rest
+    try:
+        rel = target.relative_to(toplevel)
+    except ValueError:
+        rel = target
+    ignored = subprocess.run(["git", "-C", str(toplevel), "check-ignore", "-q", "--", str(rel)],
+                             capture_output=True, text=True, timeout=30)
+    if ignored.returncode != 0:
+        return f"it is inside the git work tree {toplevel} and not ignored there (it could be committed)"
+    return None

@@ -8,9 +8,12 @@ import hashlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -29,12 +32,13 @@ def setUpModule():
     def blocked(*a, **kw):
         raise AssertionError("a test tried to open a real HTTP connection")
     global _saved
-    _saved = mine.urllib.request.urlopen
-    mine.urllib.request.urlopen = blocked
+    _saved = (urllib.request.urlopen, urllib.request.OpenerDirector.open)
+    urllib.request.urlopen = blocked
+    urllib.request.OpenerDirector.open = blocked
 
 
 def tearDownModule():
-    mine.urllib.request.urlopen = _saved
+    urllib.request.urlopen, urllib.request.OpenerDirector.open = _saved
 
 
 def tree_digest(root: Path) -> dict[str, str]:
@@ -69,7 +73,10 @@ class Miner(unittest.TestCase):
         self.assertIn(("missed", "gen-commits", "summarize the staged changes as a commit message"), got)
         self.assertIn(("interrupted", "handoff", "write a note so the next session can pick this up"), got)
         self.assertIn(("corrected", "handoff", "explain the cache thing simply"), got)
-        self.assertEqual(len(hits), 4, [(h["signal"], h["prompt"]) for h in hits])
+        self.assertIn(("corrected", "handoff", "explain what this regex does"), got)  # A fired, user typed /B
+        self.assertIn(("interrupted", "wrap", "draft the weekly summary"), got)
+        self.assertIn(("missed", "gen-commits", "ok keep going"), got)
+        self.assertEqual(len(hits), 7, [(h["signal"], h["prompt"]) for h in hits])
 
     def test_hit_keeps_source_line_and_timestamp(self):
         hits, _ = mined()
@@ -100,7 +107,7 @@ class Miner(unittest.TestCase):
             self.assertNotIn("SIDECHAIN", h["prompt"])
             self.assertNotIn("TOOLOUT", h["prompt"])
         # the tool_result "no, wrong skill" after wrap did not count as a correction
-        self.assertFalse([h for h in hits if h["skill"] == "wrap"])
+        self.assertFalse([h for h in hits if h["skill"] == "wrap" and h["source"].startswith("proj-b/")])
         # the tool_result holding /gen-commits did not count as a by-hand invocation
         self.assertNotIn("summarize the staged changes again", {h["prompt"] for h in hits})
         self.assertEqual(stats["sidechain"], 3)
@@ -109,17 +116,57 @@ class Miner(unittest.TestCase):
         _, stats = mined()
         self.assertEqual(stats["malformed"], 3)  # bad JSON, a JSON list, a user line with no message
         self.assertEqual(stats["other_types"], 2)  # mode, api-request
-        self.assertEqual(stats["files"], 2)
+        self.assertEqual(stats["files"], 3)
 
     def test_since_filters_by_prompt_date(self):
         hits, _ = mined(since="2026-09-15")
-        self.assertEqual(len(hits), 3)
+        self.assertEqual(len(hits), 6)
         self.assertNotIn("explain the cache thing simply", {h["prompt"] for h in hits})
 
     def test_unknown_skill_by_hand_is_ignored(self):
         hits, _ = mine.mine(FIX, {"eli5", "handoff", "wrap"})  # gen-commits not installed
         self.assertNotIn("missed", {h["signal"] for h in hits})
 
+
+    def test_since_includes_the_boundary_date(self):
+        hits, _ = mined(since="2026-10-03")
+        self.assertEqual({h["timestamp"][:10] for h in hits}, {"2026-10-03"})
+        self.assertEqual(len(hits), 3)
+
+    def test_compact_summary_and_transcript_only_lines_skipped(self):
+        hits, stats = mined()
+        prompts = {h["prompt"] for h in hits}
+        self.assertNotIn("check the flaky test list", prompts)
+        self.assertNotIn("count the open tickets", prompts)
+        self.assertEqual(stats["compact_or_transcript_only"], 2)
+
+    def test_meta_and_harness_text_skipped(self):
+        hits, stats = mined()
+        prompts = {h["prompt"] for h in hits}
+        self.assertNotIn("draft the release blurb", prompts)   # isMeta "no, ..." is not a correction
+        self.assertNotIn("tidy the imports", prompts)          # <system-reminder> is not a correction
+        self.assertFalse([p for p in prompts if p.startswith("<")])
+        self.assertEqual(stats["meta"], 1)
+        self.assertEqual(stats["harness_text"], 2)
+
+    def test_reroute_to_another_skill_is_a_correction_same_skill_is_not(self):
+        hits, _ = mined()
+        h = next(h for h in hits if h["prompt"] == "explain what this regex does")
+        self.assertEqual((h["signal"], h["skill"], h.get("rerouted_to")), ("corrected", "handoff", "eli5"))
+        self.assertNotIn("make the commit message for these changes", {h["prompt"] for h in hits})
+
+    def test_interrupt_ends_the_run(self):
+        hits, _ = mined()
+        self.assertEqual([h["signal"] for h in hits if h["prompt"] == "draft the weekly summary"], ["interrupted"])
+        self.assertNotIn("no, I meant the journal", {h["prompt"] for h in hits})
+
+    def test_interrupt_marker_counts_only_as_a_prefix(self):
+        hits, _ = mined()
+        self.assertNotIn("summarize this file for me", {h["prompt"] for h in hits})
+
+    def test_by_hand_command_counts_only_as_the_next_typed_turn(self):
+        hits, _ = mined()
+        self.assertNotIn("summarize the staged changes for review", {h["prompt"] for h in hits})
 
 class MineCli(unittest.TestCase):
     def test_mine_without_workspace_refuses(self):
@@ -141,8 +188,8 @@ class MineCli(unittest.TestCase):
         self.assertEqual(code, 0)
         files = list((ws / "mined").glob("hits-*.jsonl"))
         self.assertEqual(len(files), 1)
-        self.assertEqual(len(read_jsonl(files[0])), 4)
-        for word in ("corrected 2", "missed 1", "interrupted 1", "malformed 3"):
+        self.assertEqual(len(read_jsonl(files[0])), 7)
+        for word in ("corrected 3", "missed 2", "interrupted 2", "malformed 3"):
             self.assertIn(word, out)
         self.assertEqual(tree_digest(ROOT), before)
 
@@ -175,6 +222,47 @@ class ScrubCheck(unittest.TestCase):
         for rule, text in self.CASES.items():
             got = [m["rule"] for m in mine.scrub_check(text, ["Zorblatt"])]
             self.assertIn(rule, got, f"{rule}: {text!r} -> {got}")
+
+    MORE = {
+        "secret:stripe-key": "charge with " + "sk_" + "live_abcdefghijklmnop1234",
+        "secret:google-key": "maps key " + "AIza" + "SyA1234567890abcdefghijklmnopqrstu",
+        "secret:hf-token": "pull with " + "hf_" + "abcdefghijklmnopqrstuvwx",
+        "secret:password-is": "my password is tr0ub4dor, log in",
+        "secret:split-key": "the key is " + "sk-ant- " + "api03abcdefghijklmnopqrstu",
+        "deny:money": ["it was CAD 20 total", "USD 50 for hosting", "costs 20 CHF", "about 30 euros",
+                       "only 99 cents", "paid ₹500 for it", "£12 at the shop"],
+        "deny:hostname": "see internal-wiki.example/team/page for it",
+        "deny:path": ["read ~bob/notes.txt first", r"copy \\fileserver\share\doc.txt", "/etc/hosts too"],
+        "deny:phone": ["text +33 6 12 34 56 78 now", "ring 5145550199 later", "call +1 514 555 0199"],
+    }
+
+    def test_more_classes_are_caught(self):
+        for rule, texts in self.MORE.items():
+            for text in ([texts] if isinstance(texts, str) else texts):
+                got = [m["rule"] for m in mine.scrub_check(text, [])]
+                self.assertIn(rule, got, f"{rule}: {text!r} -> {got}")
+
+    def test_private_names_normalised_on_both_sides(self):
+        names = ["Zoë O’Brien-Kahl"]
+        for t in ["ask zoe o'brien-kahl today", "ask ZOË  O’BRIEN–KAHL today", "ask Zoe\tO'Brien-Kahl"]:
+            self.assertIn("deny:private-name", [m["rule"] for m in mine.scrub_check(t, names)], t)
+        self.assertFalse(mine.scrub_check("ask zoe today", names))
+
+    def test_ordinary_routing_prompts_pass(self):
+        for t in ["explain recursion simply", "write a commit message for the parser fix", "summarise this PR",
+                  "wrap up the session", "hand off to the next session", "eli5 the cache, 2 examples"]:
+            self.assertEqual(mine.scrub_check(t, ["Zorblatt"]), [], t)
+
+    def test_hints_show_rule_and_length_only(self):
+        texts = list(self.CASES.values())
+        for t in texts:
+            for m in mine.scrub_check(t, ["Zorblatt"]):
+                self.assertRegex(m["hint"], r"^\(\d+ chars\)$", (t, m))
+
+    def test_comments_in_private_names_are_ignored(self):
+        ws = Path(tempfile.mkdtemp())
+        (ws / "private-names.txt").write_text("# people\nZorblatt\n  \n#Quux\n", encoding="utf-8")
+        self.assertEqual(mine.private_names(ws), ["Zorblatt"])
 
     def test_clean_case_passes(self):
         for t in ["explain the retry loop like I'm five", "/eli5 3",
@@ -296,6 +384,22 @@ class Scrub(unittest.TestCase):
         self.assertIn("teammate's retry loop", md)
         self.assertTrue(path.name.startswith("review-") and path.parent == self.ws / "mined")
 
+    def test_second_scrub_the_same_day_keeps_the_first_review(self):
+        drafts = {h["prompt"]: "explain the retry loop simply" for h in HITS}
+        _, first, _ = self.scrub(drafts)
+        saved = (first.read_bytes(), first.with_suffix(".md").read_bytes())
+        _, second, _ = self.scrub({h["prompt"]: "a different draft" for h in HITS})
+        self.assertNotEqual(first, second)
+        self.assertEqual((first.read_bytes(), first.with_suffix(".md").read_bytes()), saved)
+        self.assertIn("a different draft", second.read_text())
+
+    def test_assertion_error_in_the_model_call_is_not_swallowed(self):
+        def boom(prompt, skill, signal):
+            raise AssertionError("a test guard fired")
+        with self.assertRaises(AssertionError):
+            with contextlib.redirect_stdout(io.StringIO()):
+                mine.scrub(self.hits, self.ws, boom)
+
     def test_model_error_is_a_rejected_row_not_a_crash(self):
         def broken(prompt, skill, signal):
             raise mine.ScrubError("ollama: connection refused")
@@ -388,6 +492,16 @@ class Accept(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.accept()
 
+    def test_a_row_missing_a_required_key_writes_nothing(self):
+        for key in ("id", "skill", "signal", "expect", "status"):
+            bad = self.row(2, "dropped")
+            del bad[key]
+            self.write([self.row(1, "accepted"), bad])
+            with self.assertRaises(SystemExit) as e:
+                self.accept()
+            self.assertIn(key, str(e.exception))
+            self.assertFalse((self.ws / "sets").exists(), key)
+
     def test_skill_without_a_public_set_gets_a_new_one(self):
         self.write([self.row(1, "accepted", skill="private-skill")])
         self.assertEqual(self.accept()[0], 0)
@@ -405,6 +519,117 @@ class Accept(unittest.TestCase):
         self.write([self.row(1, "accepted")])
         with self.assertRaises(SystemExit):
             run(["accept", "--review", str(self.review), "--workspace", str(ROOT)])
+
+
+class FakeOpener:
+    def __init__(self, content=None, exc=None):
+        self.content, self.exc, self.reqs = content, exc, []
+
+    def open(self, req, timeout=None):
+        self.reqs.append(req)
+        if self.exc:
+            raise self.exc
+        return io.BytesIO(json.dumps({"message": {"content": self.content}}).encode())
+
+
+class Scrubber(unittest.TestCase):
+    PROXIES = {"http_proxy": "http://proxy.example.test:3128", "HTTP_PROXY": "http://proxy.example.test:3128",
+               "https_proxy": "http://proxy.example.test:3128", "all_proxy": "socks5://proxy.example.test:1080",
+               "ALL_PROXY": "socks5://proxy.example.test:1080", "no_proxy": "", "NO_PROXY": ""}
+
+    def test_proxy_env_is_never_used(self):
+        with mock.patch.dict(os.environ, self.PROXIES):
+            self.assertTrue(urllib.request.getproxies())  # the env really is set
+            s = mine.OllamaScrubber("qwen3:8b", "127.0.0.1:11434")
+        proxied = [h for h in s.opener.handlers if isinstance(h, urllib.request.ProxyHandler) and h.proxies]
+        self.assertEqual(proxied, [])
+
+    def test_init_rechecks_the_host(self):
+        for h in ("0.0.0.0:11434", "http://ollama.example.org"):
+            with self.assertRaises(SystemExit):
+                mine.OllamaScrubber("m", h, opener=FakeOpener('{"prompt": "x"}'))
+
+    def test_request_shape_and_reply(self):
+        op = FakeOpener('{"prompt": "  explain the loop simply  "}')
+        s = mine.OllamaScrubber("qwen3:8b", "localhost:11434", opener=op)
+        self.assertEqual(s("RAW prompt text", "eli5", "missed"), "explain the loop simply")
+        req = op.reqs[0]
+        self.assertEqual(req.full_url, "http://localhost:11434/api/chat")
+        body = json.loads(req.data)
+        self.assertEqual((body["model"], body["stream"], body["format"]), ("qwen3:8b", False, "json"))
+        self.assertEqual([m["role"] for m in body["messages"]], ["system", "user"])
+        self.assertEqual(body["messages"][0]["content"], mine.SCRUB_SYSTEM)
+        self.assertIn("RAW prompt text", body["messages"][1]["content"])
+
+    def test_bad_replies_are_scrub_errors(self):
+        for op in (FakeOpener('{"prompt": "   "}'), FakeOpener("not json"), FakeOpener('{"other": 1}'),
+                   FakeOpener('{"prompt": 3}'), FakeOpener(exc=OSError("connection refused"))):
+            with self.assertRaises(mine.ScrubError):
+                mine.OllamaScrubber("m", "127.0.0.1", opener=op)("p", "s", "missed")
+
+    def test_assertion_error_passes_through(self):
+        op = FakeOpener(exc=AssertionError("guard"))
+        with self.assertRaises(AssertionError):
+            mine.OllamaScrubber("m", "127.0.0.1", opener=op)("p", "s", "missed")
+
+
+class WorkspaceRule(unittest.TestCase):
+    def test_case_variant_of_the_repo_is_inside(self):
+        alt = Path(str(ROOT).swapcase())
+        if not alt.exists():
+            self.skipTest("case-sensitive file system")
+        self.assertTrue(mine.is_inside(alt, ROOT))
+        self.assertTrue(mine.is_inside(alt / "private" / "ws", ROOT))
+        with self.assertRaises(SystemExit):
+            run(["--skills-dir", EXAMPLES, "mine", "--transcripts", str(FIX), "--workspace", str(alt / "private")])
+
+    def test_symlink_into_the_repo_is_inside(self):
+        t = Path(tempfile.mkdtemp())
+        (t / "link").symlink_to(ROOT)
+        self.assertTrue(mine.is_inside(t / "link" / "ws", ROOT))
+        self.assertTrue(mine.is_inside(t / "link" / "results" / "ws", ROOT))
+
+    def test_dotdot_is_resolved(self):
+        t = Path(tempfile.mkdtemp())
+        root = t / "root"
+        (root / "sub").mkdir(parents=True)
+        self.assertFalse(mine.is_inside(root / ".." / "other", root))
+        self.assertFalse(mine.is_inside(root / "sub" / ".." / ".." / "other", root))
+        self.assertTrue(mine.is_inside(t / "other" / ".." / "root" / "x", root))
+
+    def test_repo_is_refused_even_where_git_ignores_it(self):
+        self.assertIn("inside the repo", mine.workspace_problem(ROOT / "results" / "private", ROOT))
+
+
+@unittest.skipUnless(shutil.which("git"), "git not installed")
+class GitWorkTree(unittest.TestCase):
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        (self.repo / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+        (self.repo / "ignored").mkdir()
+
+    def test_tracked_path_in_another_repo_is_refused(self):
+        msg = mine.workspace_problem(self.repo / "private", ROOT)
+        self.assertIsNotNone(msg)
+        self.assertIn("git work tree", msg)
+        with self.assertRaises(SystemExit):
+            run(["--skills-dir", EXAMPLES, "mine", "--transcripts", str(FIX),
+                 "--workspace", str(self.repo / "private")])
+
+    def test_ignored_path_in_another_repo_is_allowed(self):
+        self.assertIsNone(mine.workspace_problem(self.repo / "ignored" / "skill-evals", ROOT))
+        code, _ = run(["--skills-dir", EXAMPLES, "mine", "--transcripts", str(FIX),
+                       "--workspace", str(self.repo / "ignored" / "skill-evals")])
+        self.assertEqual(code, 0)
+
+    def test_outside_any_repo_is_allowed(self):
+        self.assertIsNone(mine.workspace_problem(Path(tempfile.mkdtemp()) / "ws", ROOT))
+
+    def test_without_git_only_the_repo_is_refused(self):
+        with mock.patch.object(mine.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.assertIsNone(mine.workspace_problem(self.repo / "private", ROOT))
+            self.assertIsNotNone(mine.workspace_problem(ROOT / "x", ROOT))
 
 
 if __name__ == "__main__":
