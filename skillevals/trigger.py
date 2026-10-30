@@ -157,11 +157,25 @@ def new_run_id(judge_label: str, variant: str) -> str:
     return unique_run_id(f"{datetime.now():%Y-%m-%dT%H%M%S}-{slug}-{variant}")
 
 
-def write_jsonl(rows: list[dict], root: Path) -> Path:
-    d = root / "results" / rows[0]["date"]
+def write_new(d: Path, rows: list[dict]) -> Path:
+    """Write rows to d/<run_id>.jsonl, created exclusively: if another process already wrote a
+    file of that name, the run takes the id <run_id>-2, -3, ... (rows updated), never overwriting."""
     d.mkdir(parents=True, exist_ok=True)
-    p = d / f"{rows[0]['run_id']}.jsonl"
-    with p.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return p
+    base, k = rows[0]["run_id"], 1
+    while True:
+        rid = base if k == 1 else f"{base}-{k}"
+        p = d / f"{rid}.jsonl"
+        try:
+            f = p.open("x", encoding="utf-8")
+        except FileExistsError:
+            k += 1
+            continue
+        with f:
+            for r in rows:
+                r["run_id"] = rid
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        return p
+
+
+def write_jsonl(rows: list[dict], root: Path) -> Path:
+    return write_new(root / "results" / rows[0]["date"], rows)

@@ -324,8 +324,8 @@ def _canary(args) -> tuple[int, list[dict], Path]:
 
 
 def _canary_out(rows, draft, before, out: Path, args=None) -> tuple[int, list[dict], Path]:
-    run_id = rows[0]["run_id"]
     p = behaviour.write_jsonl(rows, out)
+    run_id = rows[0]["run_id"]  # after the write: an existing file of that name gives it a suffix
     _written(args, p)
     v = behaviour.verdict(rows)
     md = behaviour.render(rows, v)
@@ -416,6 +416,17 @@ agent graded by --grader1, and one --regrade of that canary by --grader2. Prints
 run's worst case and the plan total, then exits: no model is called without --go."""
 
 
+def _count(text: str) -> int:
+    """argparse type for a run/rep/sample count: a whole number of at least 1."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {n}")
+    return n
+
+
 def _api_spec(spec: str, flag: str) -> str:
     if not spec.startswith("anthropic:"):
         raise SystemExit(f"models compares anthropic: specs only (priced in real dollars); {flag} got {spec!r}")
@@ -501,18 +512,24 @@ def cmd_models(args) -> int:
         raise SystemExit("models --go needs --workspace DIR: comparison runs always write outside the repo")
     if args.max_usd is None:
         raise SystemExit("models --go needs --max-usd: the plan total must fit under it")
+    empty = [n for n, s in enumerate(plan["steps"], 1) if not s["worst_usd"] > 0]
+    if empty:  # every step makes paid calls; a zero or negative bound means the plan is wrong
+        raise SystemExit(f"worst case not above $0 for step(s) {empty}: refusing to start (a bad count or price?)")
     if plan["total"] > args.max_usd:
         raise SystemExit(f"plan total ${plan['total']:.4f} > --max-usd ${args.max_usd}: refusing to start "
                          f"(prices as of {prices.PRICES_AS_OF}). Raise the cap or shrink the plan.")
     ws = _out(args)
     plan_id = f"{datetime.now():%Y-%m-%dT%H%M%S}"
-    mpath = ws / "results" / "models" / f"{plan_id}.json"
+    (ws / "results" / "models").mkdir(parents=True, exist_ok=True)
     k = 1
-    while mpath.exists():  # another plan started this second: never overwrite its manifest
-        k += 1
-        mpath = ws / "results" / "models" / f"{plan_id}-{k}.json"
+    while True:  # created exclusively: another plan started this second keeps its manifest
+        mpath = ws / "results" / "models" / (f"{plan_id}.json" if k == 1 else f"{plan_id}-{k}.json")
+        try:
+            mpath.open("x", encoding="utf-8").close()
+            break
+        except FileExistsError:
+            k += 1
     plan_id = mpath.stem
-    mpath.parent.mkdir(parents=True, exist_ok=True)
     manifest = {"plan_id": plan_id, "models": args.models, "grader1": args.grader1, "grader2": args.grader2,
                 "runs": args.runs, "reps": args.reps, "canaries": Path(args.canaries).name,
                 "prices_as_of": prices.PRICES_AS_OF, "max_usd": args.max_usd, "total_usd": plan["total"],
@@ -520,6 +537,13 @@ def cmd_models(args) -> int:
 
     def save():
         mpath.write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+
+    def finish() -> Path:
+        for s in plan["steps"]:
+            if s["status"] in ("planned", "written"):
+                s["status"] = "not run" if s["status"] == "planned" else "crashed-after-write"
+        save()
+        return models.write_report(mpath, ws)
 
     save()
     canary_results, canary_rows = None, []
@@ -548,13 +572,14 @@ def cmd_models(args) -> int:
             step.update(status=status, error=f"{type(e).__name__}: {e}"[:300])
             manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}) crashed: {step['error']}"
             if isinstance(e, AssertionError):  # also the tests' no-real-call guard: record, then re-raise
-                save()
+                finish()
                 raise
             break
         except BaseException as e:  # Ctrl-C: record where the plan stopped, then stop
-            step.update(status="interrupted", error=type(e).__name__)
+            status = "crashed-after-write" if step.get("results") else "interrupted"
+            step.update(status=status, error=type(e).__name__)
             manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}) interrupted"
-            save()
+            finish()
             raise
         finally:
             save()
@@ -570,11 +595,7 @@ def cmd_models(args) -> int:
             manifest["stopped"] = f"step {n} ({step['kind']} {step['model']}): budget cap reached on {capped} row(s)"
             break
         save()
-    for s in plan["steps"]:
-        if s["status"] == "planned":
-            s["status"] = "not run"
-    save()
-    rp = models.write_report(mpath, ws)
+    rp = finish()
     print(f"\nmanifest: {mpath.relative_to(ws)}\nreport:   {rp.relative_to(ws)}")
     if manifest["stopped"]:
         print(f"STOPPED: {manifest['stopped']}")
@@ -604,7 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="claude[:model] | anthropic:<model-id>[@effort] | ollama[:model] | scripted")
         p.add_argument("--max-usd", type=float, default=1.0,
                        help="hard cap on judge spend for the run (real dollars for anthropic:)")
-        p.add_argument("--samples", type=int, default=1, help="repeat each prompt N times (flakiness)")
+        p.add_argument("--samples", type=_count, default=1, help="repeat each prompt N times (flakiness)")
         p.add_argument("--no-lint", action="store_true")
         p.add_argument("--break-mode", choices=sorted(BREAK_MODES), default="wrong")
         p.add_argument("--blind-names", action="store_true",
@@ -623,7 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skill-file", help="SKILL.md to load as the agent's system prompt (default: the set's draft)")
     p.add_argument("--agent", default="claude:sonnet", help="claude[:model] | anthropic:<model-id>[@effort] | mutant:always-refuse | mutant:always-comply")
     p.add_argument("--grader", default="claude:haiku", help="claude[:model] | anthropic:<model-id>[@effort] | scripted")
-    p.add_argument("--reps", type=int, default=3)
+    p.add_argument("--reps", type=_count, default=3)
     p.add_argument("--max-calls", type=int, default=60, help="refuse to start if the plan needs more claude calls")
     p.add_argument("--max-usd", type=float, default=0.5,
                    help="hard stop: no new call once the run has spent this much (CLI list price; real dollars "
@@ -670,8 +691,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--models", nargs="+", help="anthropic:<model-id>@<effort> specs under test (judge and agent)")
     p.add_argument("--grader1", help="grading 1 of every canary run (not one of the models under test)")
     p.add_argument("--grader2", help="grading 2: a --regrade of the same replies")
-    p.add_argument("--runs", type=int, default=2, help="trigger runs per model and names mode (default 2)")
-    p.add_argument("--reps", type=int, default=3, help="canary reps per case (default 3)")
+    p.add_argument("--runs", type=_count, default=2, help="trigger runs per model and names mode (default 2)")
+    p.add_argument("--reps", type=_count, default=3, help="canary reps per case (default 3)")
     p.add_argument("--sets", nargs="*", help="eval set files (default: sets/*.json)")
     p.add_argument("--canaries", default=str(ROOT / "canaries" / "overnight-runner.json"))
     p.add_argument("--skill-file", help="SKILL.md for the canary agent (default: the set's draft)")

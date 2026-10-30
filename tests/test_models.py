@@ -377,5 +377,136 @@ class RegradePreflight(unittest.TestCase):
         self.assertLess(b, prices.estimate_tokens(long), "case b's call does not carry case a's replies")
 
 
+class Counts(unittest.TestCase):
+    def test_zero_or_negative_counts_are_refused_by_the_parser(self):
+        cases = [models_argv(None, "--reps", "-3"), models_argv(None, "--reps", "0"),
+                 models_argv(None, "--runs", "-3"), models_argv(None, "--runs", "0"),
+                 ["canary", "--reps", "0"], ["canary", "--reps", "-3"],
+                 ["trigger", "--samples", "0"], ["trigger", "--samples", "-3"],
+                 ["prove-can-fail", "eli5", "--samples", "0"]]
+        for argv in cases:
+            with self.assertRaises(SystemExit, msg=argv) as cm, contextlib.redirect_stderr(io.StringIO()):
+                cli.build_parser().parse_args(argv)
+            self.assertEqual(cm.exception.code, 2, argv)
+        self.assertEqual(cli.build_parser().parse_args(models_argv(None, "--reps", "1")).reps, 1)
+
+    def test_go_refuses_a_step_whose_worst_case_is_not_positive(self):
+        ws = tempfile.mkdtemp()
+        guard = CountingRefusal()
+        with mock.patch.object(cli.prices, "worst_case", return_value=0.0), \
+                mock.patch.object(api.Caller, "client", guard), self.assertRaises(SystemExit) as cm:
+            run(models_argv(ws, "--go", "--max-usd", "100000"))
+        self.assertEqual(guard.n, 0)
+        self.assertIn("worst case", str(cm.exception))
+        self.assertFalse(list(Path(ws).rglob("*.json*")))
+
+
+class Unwritten(unittest.TestCase):
+    def test_interrupt_marks_the_rest_not_run_and_reports_spend_as_unknown(self):
+        ws = tempfile.mkdtemp()
+        with mock.patch.object(behaviour, "run", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"), SmartClient())
+        _, m = manifest(ws)
+        self.assertEqual([s["status"] for s in m["steps"]], ["done", "done", "interrupted"] + ["not run"] * 5)
+        text, = [p.read_text() for p in Path(ws).glob("reports/*-models.md")]
+        line = next(l for l in text.splitlines() if l.startswith("| 3 | canary"))
+        self.assertIn(f"unknown (up to ${m['steps'][2]['worst_usd']:.4f})", line)
+        total = next(l for l in text.splitlines() if "**plan total**" in l)
+        self.assertIn("lower bound", total)
+
+    def test_crash_before_write_is_unknown_and_a_clean_run_is_not_a_lower_bound(self):
+        ws = tempfile.mkdtemp()
+        with mock.patch.object(behaviour, "run", side_effect=RuntimeError("boom")):
+            run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"), SmartClient())
+        text, = [p.read_text() for p in Path(ws).glob("reports/*-models.md")]
+        self.assertIn("unknown (up to $", next(l for l in text.splitlines() if l.startswith("| 3 | canary")))
+        ws2 = tempfile.mkdtemp()
+        run(models_argv(ws2, "--go", "--max-usd", "100000", "--runs", "1"), SmartClient())
+        text2, = [p.read_text() for p in Path(ws2).glob("reports/*-models.md")]
+        self.assertNotIn("lower bound", text2)
+        self.assertNotIn("unknown", text2)
+
+
+class NoOverwrite(unittest.TestCase):
+    ROWS = [{"run_id": "2026-01-01T120000-x", "date": "2026-01-01", "n": 1}]
+
+    def test_trigger_results_never_overwrite_an_existing_file(self):
+        root = Path(tempfile.mkdtemp())
+        old = root / "results" / "2026-01-01" / "2026-01-01T120000-x.jsonl"
+        old.parent.mkdir(parents=True)
+        old.write_text("someone else's run\n")
+        rows = [dict(r) for r in self.ROWS]
+        p = trigger.write_jsonl(rows, root)
+        self.assertNotEqual(p, old)
+        self.assertEqual(old.read_text(), "someone else's run\n")
+        self.assertEqual(json.loads(p.read_text())["run_id"], p.stem, "the rows carry the new id")
+        self.assertEqual(rows[0]["run_id"], p.stem)
+
+    def test_canary_results_never_overwrite_an_existing_file(self):
+        root = Path(tempfile.mkdtemp())
+        old = root / "results" / "canary" / "2026-01-01" / "2026-01-01T120000-x.jsonl"
+        old.parent.mkdir(parents=True)
+        old.write_text("someone else's run\n")
+        rows = [dict(r) for r in self.ROWS]
+        p = behaviour.write_jsonl(rows, root)
+        self.assertNotEqual(p, old)
+        self.assertEqual(old.read_text(), "someone else's run\n")
+        self.assertEqual(rows[0]["run_id"], p.stem)
+
+    def test_manifest_never_overwrites_an_existing_one(self):
+        ws = tempfile.mkdtemp()
+        old = Path(ws) / "results" / "models" / "2026-01-01T120000.json"
+        old.parent.mkdir(parents=True)
+        old.write_text("{}")
+        with mock.patch.object(cli, "datetime", FixedClock):
+            run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"), SmartClient())
+        self.assertEqual(old.read_text(), "{}")
+        new = [p for p in old.parent.glob("*.json") if p != old]
+        self.assertEqual(len(new), 1)
+        self.assertEqual(json.loads(new[0].read_text())["plan_id"], new[0].stem)
+
+
+class Guards(unittest.TestCase):
+    def test_two_steps_reporting_one_results_file_stop_the_plan(self):
+        ws = tempfile.mkdtemp()
+
+        def same_file(args, step):
+            p = Path(ws) / "results" / "same.jsonl"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("")
+            args.on_results(p)
+            return [], p
+        with mock.patch.object(cli, "_run_step", same_file):
+            rc, _ = run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"))
+        _, m = manifest(ws)
+        self.assertEqual(rc, 1)
+        self.assertEqual([s["status"] for s in m["steps"]][:3], ["done", "crashed", "not run"])
+        self.assertIn("collision", m["steps"][1]["error"])
+
+    def test_a_run_that_never_reports_its_file_stops_the_plan(self):
+        ws = tempfile.mkdtemp()
+
+        def silent(args, step):
+            p = Path(ws) / "results" / "silent.jsonl"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("")
+            return [], p
+        with mock.patch.object(cli, "_run_step", silent):
+            rc, _ = run(models_argv(ws, "--go", "--max-usd", "100000", "--runs", "1"))
+        _, m = manifest(ws)
+        self.assertEqual(rc, 1)
+        self.assertEqual(m["steps"][0]["status"], "crashed")
+        self.assertIn("not recorded", m["steps"][0]["error"])
+        self.assertEqual({s["status"] for s in m["steps"][1:]}, {"not run"})
+
+
+class CertifiedWording(unittest.TestCase):
+    def test_only_an_agreed_pass_or_fail_is_certified(self):
+        full = {"graded": 4, "agree": 4, "excluded": 0}
+        self.assertEqual(models.certify("INCONCLUSIVE", "INCONCLUSIVE", full), "not certified")
+        self.assertEqual(models.certify("-", "-", full), "not certified")
+        self.assertEqual(models.certify("PASS", "PASS", full), "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -116,6 +116,17 @@ mutant "models: regrade priced as all replies in one call" skillevals/__main__.p
 mutant "models: agreement counts behaviour only"           skillevals/models.py ' and g["passed"] == r["passed"]' ''
 mutant "models: paid run that crashes after writing is left out" skillevals/__main__.py '    p = trigger.write_jsonl(rows, out)
     _written(args, p)' '    p = trigger.write_jsonl(rows, out)'
+mutant "counts: zero or negative --reps/--runs/--samples accepted" skillevals/__main__.py 'if n < 1:' 'if False:'
+mutant "models: a step with a $0 worst case is run"         skillevals/__main__.py 'if empty:  # every step' 'if False:  # every step'
+mutant "models: unwritten paid step reported as $0"         skillevals/models.py 'paid_unknown = s["status"] in ("crashed", "interrupted") and not s.get("results")' 'paid_unknown = False'
+mutant "models: Ctrl-C leaves no report, steps left planned" skillevals/__main__.py 'interrupted"
+            finish()' 'interrupted"
+            save()'
+mutant "results: an existing results file is overwritten"   skillevals/trigger.py 'f = p.open("x", encoding="utf-8")' 'f = p.open("w", encoding="utf-8")'
+mutant "models: an existing manifest is overwritten"        skillevals/__main__.py 'mpath.open("x", encoding="utf-8").close()' 'mpath.open("w", encoding="utf-8").close()'
+mutant "models: two steps sharing a results file accepted"  skillevals/__main__.py 'if any(s.get("results") == rel for s in plan["steps"] if s is not step):' 'if False:'
+mutant "models: a run that never reports its file accepted" skillevals/__main__.py 'if step.get("results") != str(p.relative_to(ws)):' 'if False:'
+mutant "models: agreed INCONCLUSIVE reads as certified"     skillevals/models.py ' and result1 in ("PASS", "FAIL")' ''
 mutant "run ids: two runs in one second share a file"      skillevals/trigger.py 'while out in _ISSUED:' 'while False:'
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then

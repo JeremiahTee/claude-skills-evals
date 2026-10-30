@@ -69,8 +69,9 @@ the bundled `examples/skills` via `--skills-dir`) and never writes there.
   command (`__main__.py`) plans the comparison from the `trigger`/`canary` preflight plans,
   prints it, and only with `--go` (workspace and `--max-usd` required) runs each step through
   those commands, each capped at its own worst case, stopping the plan on a cap hit or crash.
-  Run ids get a `-2`, `-3` suffix when two runs in one process start in the same second, so a
-  plan's runs never overwrite each other's results files (two processes in the same second still can).
+  Run ids get a `-2`, `-3` suffix when two runs in one process start in the same second, and
+  results files and manifests are created exclusively (a name already on disk, e.g. from another
+  process, also gets a suffix), so no run overwrites another's file.
 - `skillevals/report.py`: per-skill scorecards, `HISTORY.md`, `REPORT.md` (latest baseline per
   judge, misroutes, prove-can-fail verdicts, invalid runs) and `compare` (which cases flipped).
 - `skillevals/__main__.py`: the CLI, with `lint`, `trigger`, `compare`, `history`, `report`,

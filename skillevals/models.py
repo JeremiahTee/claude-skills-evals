@@ -33,8 +33,11 @@ def agreement(src: list[dict], reg: list[dict]) -> dict:
 
 
 def certify(result1: str, result2: str, agr: dict) -> str:
-    """A canary result counts only when both gradings give it AND agree on every graded row."""
-    return result1 if result1 == result2 and agr["agree"] == agr["graded"] else "not certified"
+    """A canary PASS or FAIL counts only when both gradings give it AND agree on every graded row.
+    Anything else (INCONCLUSIVE, a missing grading, a disagreement) is "not certified"."""
+    if result1 == result2 and result1 in ("PASS", "FAIL") and agr["agree"] == agr["graded"]:
+        return result1
+    return "not certified"
 
 
 def _costs(rows: list[dict], pairs) -> dict[str, float]:
@@ -115,20 +118,27 @@ def render(m: dict, root: Path) -> str:
           "| step | kind | model | names / grader | status | ceiling | real |", "|---|---|---|---|---|---|---|"]
     total_real: dict[str, float] = {}
     by_kind: dict[str, list] = {}
+    unknown = 0
     for n, (s, rs) in enumerate(zip(steps, rows), 1):
         real = _costs(rs, COST_PAIRS[s["kind"]])
         total_real = _add(total_real, real)
+        # stopped before its results file existed: calls may have been billed with no row to show it
+        paid_unknown = s["status"] in ("crashed", "interrupted") and not s.get("results")
+        unknown += paid_unknown
         k = by_kind.setdefault(s["kind"], [0.0, {}])
         k[0] += s["worst_usd"]
         k[1] = _add(k[1], real)
         who = s.get("names") or s.get("grader") or ""
         run = f" run {s['run']}" if s.get("run") else ""
+        spent = f"unknown (up to ${s['worst_usd']:.4f})" if paid_unknown else report.fmt_costs(real)
         L.append(f"| {n} | {s['kind']}{run} | {s['model']} | {who} | {s['status']} | ${s['worst_usd']:.4f} | "
-                 f"{report.fmt_costs(real)} |")
+                 f"{spent} |")
     for kind, (ceil, real) in by_kind.items():
         L.append(f"| | **{kind} total** | | | | ${ceil:.4f} | {report.fmt_costs(real)} |")
     L.append(f"| | **plan total** | | | | ${sum(s['worst_usd'] for s in steps):.4f} | "
-             f"{report.fmt_costs(total_real)} |")
+             f"{report.fmt_costs(total_real)}"
+             + (f" (lower bound: {unknown} step(s) stopped before writing results; spend unknown)" if unknown else "")
+             + " |")
     return "\n".join(L) + "\n"
 
 
