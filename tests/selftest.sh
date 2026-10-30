@@ -86,7 +86,11 @@ mutant "accept: edited prompt not re-checked"        skillevals/mine.py 'found =
 mutant "accept: writes the public sets/"             skillevals/mine.py 'dest = Path(ws) / "sets" / f"{skill}.json"' 'dest = Path(public_sets) / f"{skill}.json"'
 mutant "mine: workspace inside the repo allowed"     skillevals/mine.py 'if is_inside(ws, root):' 'if False:'
 mutant "scrub: proxy env honoured (raw text to a proxy)" skillevals/mine.py 'urllib.request.ProxyHandler({})' 'urllib.request.ProxyHandler()'
-mutant "workspace: repo compared by name, not inode" skillevals/mine.py 'if (st.st_dev, st.st_ino) == key:' 'if a == Path(root):'
+# Only a case-insensitive file system (macOS APFS) can spell the repo two ways; elsewhere the
+# test that catches this mutant is skipped, so the mutant is too.
+if [ -e "$(printf '%s' "$TMP" | tr 'a-zA-Z' 'A-Za-z')" ]; then
+  mutant "workspace: repo compared by name, not inode" skillevals/mine.py 'if (st.st_dev, st.st_ino) == key:' 'if a == Path(root):'
+else echo "SKIP mutant workspace: repo compared by name, not inode (case-sensitive file system)"; fi
 mutant "workspace: \"..\" not resolved"              skillevals/mine.py 'p = Path(os.path.abspath(os.path.expanduser(str(p))))' 'p = Path(os.path.expanduser(str(p)))'
 mutant "workspace: other git work trees allowed"     skillevals/mine.py 'if ignored.returncode != 0:' 'if False:'
 mutant "mine: compact summary read as typed"         skillevals/mine.py 'if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):' 'if d.get("isVisibleInTranscriptOnly"):'
