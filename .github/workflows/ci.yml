@@ -25,3 +25,5 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Selftest (unit tests + mutants + lint of examples/skills)
         run: bash tests/selftest.sh
+      - name: Canary regression gate (committed results, no model call)
+        run: python3 -m skillevals gate

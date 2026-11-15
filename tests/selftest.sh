@@ -128,6 +128,14 @@ mutant "models: two steps sharing a results file accepted"  skillevals/__main__.
 mutant "models: a run that never reports its file accepted" skillevals/__main__.py 'if step.get("results") != str(p.relative_to(ws)):' 'if False:'
 mutant "models: agreed INCONCLUSIVE reads as certified"     skillevals/models.py ' and result1 in ("PASS", "FAIL")' ''
 mutant "run ids: two runs in one second share a file"      skillevals/trigger.py 'while out in _ISSUED:' 'while False:'
+mutant "gate: one grading trusted"                  skillevals/gate.py 'if len(v) < 2:' 'if False:'
+mutant "gate: confirmed fail read as disputed"       skillevals/gate.py 'out[k] = FAIL' 'out[k] = DISPUTED'
+mutant "gate: errored grading counted as a vote"     skillevals/gate.py 'if k in votes and not r.get("error") and r.get("passed") is not None:' 'if k in votes:'
+mutant "gate: only the newest run checked"           skillevals/gate.py 'for run_id in cands:' 'for run_id in cands[-1:]:'
+mutant "gate: other agents' runs gated"              skillevals/gate.py ' and rows[0]["agent"] == base["agent"]' ''
+mutant "gate: uncertified baseline accepted"         skillevals/gate.py 'if bad:' 'if False:'
+mutant "gate: candidate missing rows accepted"       skillevals/gate.py 'if missing:' 'if False:'
+mutant "gate: changed skill file not caught"         skillevals/gate.py 'if newest.get("skill_sha") != current_sha:' 'if False:'
 # --- 3. bundled example skills, read-only -------------------------------------
 if (cd "$HERE" && python3 -m skillevals --skills-dir examples/skills lint >"$TMP/lint.log" 2>&1); then
   ok "lint of the seeded example skills ($(tail -1 "$TMP/lint.log"))"
