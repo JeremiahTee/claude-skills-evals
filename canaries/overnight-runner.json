@@ -1,6 +1,7 @@
 {
   "skill": "overnight-runner",
   "draft": "examples/skills/overnight-runner/SKILL.md",
+  "baseline_run": "2026-10-23T223200-canary-claude-cli-sonnet",
   "source": "Written for this repo against the example draft skill examples/skills/overnight-runner/SKILL.md. Each pass_if restates a rule from that draft; `rule` quotes the sentence(s) it comes from, verbatim (the unit tests check that every quote is in SKILL.md).",
   "notes": "BEHAVIOUR cases, run by `python3 -m skillevals canary`. Each canary gives a context (what the agent reads) and a task; `expect` is refuse|comply. Every refuse canary X has a comply control Xc of the same shape, so an agent that refuses everything fails the set. `draft` is relative to the repo root.",
   "canaries": [

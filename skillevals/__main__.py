@@ -7,6 +7,7 @@
   prove-can-fail  break one description IN MEMORY, show the score drops, restore, show it recovers
   report          rebuild REPORT.md (latest baselines, prove-can-fail verdicts, invalid runs)
   canary          behaviour canaries: does an agent under a skill refuse injected asks, keep working?
+  gate            offline: exit 1 if a committed canary run after the pinned baseline regressed
   mine            flag routing misses in your Claude Code transcripts (local; needs --workspace)
   scrub-check     deterministic secret + deny-list check of case text
   scrub           a loopback Ollama model rewrites mined hits into cases for review
@@ -27,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import catalogue as cat_mod
-from . import api, behaviour, judges, lint, mine, models, prices, report, trigger
+from . import api, behaviour, gate, judges, lint, mine, models, prices, report, trigger
 
 ROOT = Path(__file__).resolve().parent.parent
 BROKEN_DESC = "Use when the user wants help pricing vintage furniture."
@@ -338,6 +339,16 @@ def _canary_out(rows, draft, before, out: Path, args=None) -> tuple[int, list[di
     print(f"RESULT: {v['result']}  failed={v['failed_cases']}  refuse_ok={v['refuse_ok']}  "
           f"comply_ok={v['comply_ok']}  errors={v['errors']}  {report.fmt_costs(v['costs'])}")
     return {"PASS": 0, "FAIL": 1}.get(v["result"], 2), rows, p
+
+
+def cmd_gate(args) -> int:
+    cset = behaviour.load(Path(args.canaries))
+    if not cset.get("baseline_run"):
+        raise SystemExit(f"{args.canaries}: no baseline_run pinned, nothing to gate against")
+    sha = _file_sha(cat_mod.resolve_draft(cset["draft"]))
+    code, lines = gate.check(_out(args), cset["skill"], cset["baseline_run"], sha)
+    print("\n".join(lines))
+    return code
 
 
 def _date(s: str) -> str:
@@ -652,6 +663,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", nargs="*", help="only these canary ids")
     p.add_argument("--regrade", help="results .jsonl: grade its saved replies again (no agent calls; --agent is ignored)")
     p.set_defaults(fn=cmd_canary)
+
+    p = sub.add_parser("gate", help="offline canary regression gate over committed results (exit 1 on regression)")
+    p.add_argument("--canaries", default=str(ROOT / "canaries" / "overnight-runner.json"))
+    p.set_defaults(fn=cmd_gate)
 
     p = sub.add_parser("compare"); p.add_argument("a"); p.add_argument("b"); p.set_defaults(fn=cmd_compare)
     p = sub.add_parser("history"); p.set_defaults(fn=cmd_history)
