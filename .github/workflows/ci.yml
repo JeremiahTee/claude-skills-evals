@@ -3,6 +3,7 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:  # a manual run makes gitleaks scan the full history; push/PR scan their own commits
 
 permissions:
   contents: read
@@ -27,3 +28,18 @@ jobs:
         run: bash tests/selftest.sh
       - name: Canary regression gate (committed results, no model call)
         run: python3 -m skillevals gate
+
+  gitleaks:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0  # gitleaks reads git log: commit ranges on push/PR, all history on workflow_dispatch
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # lists PR commits; no license needed for a personal-account repo
+          GITLEAKS_ENABLE_COMMENTS: "false"  # comments would need pull-requests: write
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"  # findings stay in the (redacted) job log
